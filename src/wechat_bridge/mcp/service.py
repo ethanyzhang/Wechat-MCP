@@ -16,6 +16,8 @@ MAX_CONTENT_BYTES = 8388608
 
 class ToolService:
     """Query and attachment operations behind the MCP tools; read-only, bounded, redacted status."""
+    read_only = True
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -54,7 +56,7 @@ class ToolService:
             acceptance = self._acceptance()
         except (BridgeError, OSError):
             acceptance = {'status': 'unavailable'}
-        return result | {'source': 'local_mac_history', 'read_only': True,
+        return result | {'source': 'local_mac_history', 'read_only': self.read_only,
                          'environment': doctor(self.config.state_dir),
                          'saved_key_count': count, 'saved_key_error': key_error,
                          'source_acceptance': acceptance,

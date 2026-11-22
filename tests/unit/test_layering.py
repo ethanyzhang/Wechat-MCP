@@ -16,11 +16,13 @@ ALLOWED = {
     "search": {"core", "source", "adapters", "attachments", "archive"},
     "mcp": {"core", "source", "adapters", "attachments", "archive", "search"},
     "setup": {"core", "source"},
+    "send": {"core"},
 }
 # Documented function-local exceptions: (importing module, imported package or module).
 LOCAL_EXCEPTIONS = {
     ("archive/importer.py", "search"), ("archive/store.py", "search"),
     ("adapters/wechat_4_1.py", "attachments"), ("mcp/service.py", "cli"),
+    ("mcp/server.py", "send"),
 }
 
 

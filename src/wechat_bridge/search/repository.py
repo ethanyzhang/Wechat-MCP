@@ -363,6 +363,34 @@ class QueryRepository:
             if value is not None:
                 where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [value]
         return self._moment_page('moment_notifications', 'moment_notifications', {'moment_id': moment_id, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor)
+    def resolve_recipient(self, conversation_id: str) -> dict:
+        """Display name and kind of one conversation, plus how many distinct contacts and conversations share that name.
+
+        Used by the send path to bind a send to one unambiguous recipient: the name is the full stored display
+        name (never cut), name_count counts every distinct contact and conversation with that exact name in the active
+        generation. Raises invalid_id, conversation_not_found or archive_not_ready.
+        """
+        valid_id(conversation_id, 'conversation')
+        with self._snapshot() as (db, row, _):
+            generation = row['generation']
+            record = self._record(db, generation, 'conversations', conversation_id)
+            name = record.get('display_name')
+            count = 0
+            if isinstance(name, str) and name:
+                # Entities, not rows: a contact that already has a conversation (the conversation's own contact row, a
+                # group's chatroom row) is the same entity as that conversation and is not counted again.
+                count = db.execute("SELECT COUNT(*) FROM conversations WHERE generation=? AND json_extract(data,'$.display_name')=?",
+                                   (generation, name)).fetchone()[0]
+                count += db.execute("SELECT COUNT(*) FROM contacts c WHERE c.generation=? AND json_extract(c.data,'$.display_name')=? "
+                                    "AND COALESCE(json_extract(c.data,'$.source_username'),'') NOT IN "
+                                    "(SELECT COALESCE(json_extract(v.data,'$.source_username'),'') FROM conversations v WHERE v.generation=?)",
+                                    (generation, name, generation)).fetchone()[0]
+            return {'display_name': name if isinstance(name, str) and name else None, 'kind': record.get('kind'), 'name_count': count}
+
+    @property
+    def identity_key(self) -> bytes:
+        """Keyed-digest secret shared with cursors; the send log uses it so text digests cannot be guessed offline."""
+        return self._key
 
     def get_group(self, conversation_id: str, *, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         """Group record plus locally observed membership page; raises group_not_found or conversation_not_found."""
