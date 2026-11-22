@@ -468,8 +468,8 @@ Output is JSON. Exit codes: `0` ok, `2` blocked, not ready or any
 ### MCP tools
 
 `status`, `list_conversations`, `list_contacts`, `get_group`,
-`search_messages`, `get_messages`, `get_context`, `list_attachments`,
-`get_attachment`. Arguments, limits, paging and error codes are in
+`search_messages`, `get_messages`, `recent_messages`, `get_context`,
+`list_attachments`, `get_attachment`. Arguments, limits, paging and error codes are in
 [docs/mcp.md](docs/mcp.md). A generic client definition:
 
 ```json

@@ -6,6 +6,20 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- `list_conversations` returns `unread_count` and `last_timestamp`, and takes
+  `unread_only` and `sort=recent` (newest activity first). A session table without
+  the columns reports `session_unread_unavailable` instead of a silent null.
+- `recent_messages`: messages across all conversations in a time window, newest
+  first by default, backed by a `(generation, time_sort, record_id)` index.
+- Message results carry `sender_display_name` and `conversation_display_name`.
+
+### Changed
+
+- An archive records the adapter version that imported it; one imported by a
+  different version is reported stale and the watcher refreshes it.
+
 ## [0.1.2] - 2026-10-24
 
 ### Fixed

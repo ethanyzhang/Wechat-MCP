@@ -27,6 +27,8 @@ def ensure_index(archive, *, building_generation=None):
     Raises archive_refresh_in_progress if another stage is building.
     """
     with archive.connection(write=True) as db:
+        # Cross-conversation time listings (recent_messages) page by time alone; older archives gain this on their next refresh.
+        db.execute('CREATE INDEX IF NOT EXISTS message_time ON messages(generation,time_sort,record_id)')
         if db.execute('PRAGMA user_version').fetchone()[0] == 2:
             return
         stages = {r[0] for r in db.execute('SELECT generation FROM generations WHERE state="building"')}

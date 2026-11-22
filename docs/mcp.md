@@ -68,11 +68,12 @@ failures (the caller's rejected value is not echoed). Opaque IDs have the form
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `status` | none | Readiness, coverage/freshness, environment, saved key count, latest live proof status, limits, supported image formats |
-| `list_conversations` | `query`, `kind` (`direct`\|`group`), `limit`, `cursor` | Conversations |
+| `list_conversations` | `query`, `kind` (`direct`\|`group`), `unread_only`, `sort` (`name`\|`recent`), `limit`, `cursor` | Conversations with `unread_count` and `last_timestamp` (UTC; null when WeChat records none). `unread_only` keeps those with unread messages; `sort=recent` puts the newest activity first and conversations without a known time last. An archive imported before this field existed reports `freshness.stale` until it refreshes |
 | `list_contacts` | `query`, `limit`, `cursor` | Contacts; duplicate names keep distinct IDs |
 | `get_group` | `conversation_id`, `limit`, `cursor` | Group metadata and locally observed membership (not a historical roster) |
 | `search_messages` | `query` (required), `conversation_id`, `sender_id`, `start`, `end`, `type`, `limit`, `cursor` | Literal Unicode/Chinese substring matches with excerpts; times need a timezone |
-| `get_messages` | `conversation_id`, `sender_id`, `start`, `end`, `type`, `limit`, `cursor` | Chronological timeline, including unsupported messages and unknown senders |
+| `get_messages` | `conversation_id`, `sender_id`, `start`, `end`, `type`, `limit`, `cursor` | Chronological timeline, including unsupported messages and unknown senders. Every message result (this tool, `search_messages`, `recent_messages`, `get_context`) carries `sender_display_name` and `conversation_display_name` (null when unknown, cut at 256 characters) from the same generation |
+| `recent_messages` | `start` (required, timezone), `end`, `type`, `sender_id`, `order` (`desc`\|`asc`), `limit`, `cursor` | Messages across all conversations in a time window, newest first by default; messages with no valid time are excluded |
 | `get_context` | `message_id`, `before` (10), `after` (10), `generation` | A message plus at most 100 combined neighbors |
 | `list_attachments` | `message_id`, `kind` (`image`\|`file`), `representation` (`original`\|`thumbnail`), `availability`, `limit`, `cursor` | Attachment metadata; `local_unverified` means bytes not yet checked |
 | `get_attachment` | `attachment_id`, `representation` (`auto`\|`source`\|`decoded`), `max_bytes`, `generation` | Verified bytes plus metadata (hashes, labels, resource URI) |

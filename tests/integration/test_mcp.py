@@ -12,7 +12,7 @@ from tests.integration.test_mcp_service import service_case
 from tests.support.images import png
 
 TOOLS = {'status', 'list_conversations', 'list_contacts', 'get_group', 'search_messages',
-         'get_messages', 'get_context', 'list_attachments', 'get_attachment'}
+         'get_messages', 'recent_messages', 'get_context', 'list_attachments', 'get_attachment'}
 
 
 async def exercise(client):
@@ -35,6 +35,13 @@ async def exercise(client):
     timeline = await client.call_tool('get_messages', {'conversation_id': group['conversation_id']})
     assert len(timeline.structured_content['items']) == 4
     assert any(m['source']['server_id'] == '9007199254740993' for m in timeline.structured_content['items'])
+    recent = await client.call_tool('recent_messages', {'start': '2000-01-01T00:00:00Z'})
+    assert not recent.is_error and len(recent.structured_content['items']) == 4
+    assert all('sender_display_name' in m and 'conversation_display_name' in m for m in recent.structured_content['items'])
+    unread = await client.call_tool('list_conversations', {'unread_only': True, 'sort': 'recent'})
+    assert not unread.is_error
+    naive = await client.call_tool('recent_messages', {'start': '2000-01-01'})
+    assert naive.is_error
     attachments = await client.call_tool('list_attachments', {})
     for item in attachments.structured_content['items']:
         result = await client.call_tool('get_attachment', {'attachment_id': item['attachment_id']})
@@ -93,7 +100,7 @@ def test_real_stdio_subprocess_handshake_delivery_and_reconnect(tmp_path):
             async with Client(stdio_client(parameters)) as client:
                 await exercise(client)
             async with Client(stdio_client(parameters)) as client:
-                assert len((await client.list_tools()).tools) == 9
+                assert len((await client.list_tools()).tools) == 10
                 assert (await client.call_tool('status', {})).structured_content['active_generation'] is not None
     asyncio.run(scenario())
 

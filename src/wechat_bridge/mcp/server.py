@@ -1,4 +1,4 @@
-"""Nine typed read-only tools over stdio; stdout is protocol only."""
+"""Ten typed read-only tools over stdio; stdout is protocol only."""
 from contextlib import asynccontextmanager
 import base64
 import inspect
@@ -80,7 +80,7 @@ def _attachment(service, attachment_id, representation, max_bytes, generation):
 
 
 def create_server(config, *, watch=True):
-    """Build the MCP server with nine read-only tools and one attachment resource.
+    """Build the MCP server with ten read-only tools and one attachment resource.
 
     Unknown tool arguments are rejected with invalid_arguments. With watch=True one
     background watcher per state directory refreshes the archive.
@@ -144,9 +144,10 @@ def create_server(config, *, watch=True):
         return _invoke(service.status)
 
     @tool
-    def list_conversations(query: NameQuery = '', kind: str | None = None, limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
-        """List local conversations; default50/max200 and generation-bound cursor."""
-        return _invoke(lambda: service.queries.list_conversations(query, kind=kind, limit=limit, cursor=cursor))
+    def list_conversations(query: NameQuery = '', kind: str | None = None, unread_only: bool = False, sort: str = 'name',
+                           limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
+        """List local conversations with unread_count and last_timestamp; unread_only filters, sort='recent' puts the newest activity first; default50/max200 and generation-bound cursor."""
+        return _invoke(lambda: service.queries.list_conversations(query, kind=kind, unread_only=unread_only, sort=sort, limit=limit, cursor=cursor))
 
     @tool
     def list_contacts(query: NameQuery = '', limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
@@ -172,6 +173,12 @@ def create_server(config, *, watch=True):
         """Read a local chronological timeline, preserving unsupported messages and unknown senders."""
         return _invoke(lambda: service.queries.get_messages(conversation_id, sender_id=sender_id, start=start, end=end,
                        type=type, limit=limit, cursor=cursor))
+
+    @tool
+    def recent_messages(start: SearchQuery, end: str | None = None, type: str | None = None, sender_id: ContactId | None = None,
+                        order: str = 'desc', limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
+        """Messages across all conversations from start (required, with timezone) to optional end; newest first, or order='asc'. Each message carries sender and conversation display names."""
+        return _invoke(lambda: service.queries.recent_messages(start, end=end, type=type, sender_id=sender_id, order=order, limit=limit, cursor=cursor))
 
     @tool
     def get_context(message_id: MessageId, before: Neighbors = 10, after: Neighbors = 10, generation: Generation | None = None) -> CallToolResult:

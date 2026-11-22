@@ -138,7 +138,7 @@ Steps 6 and 7 run at query time and never touch the source databases.
 ### 7. MCP response
 
 - **Owner:** `mcp/service.py` (bytes and status, independent of protocol) and
-  `mcp/server.py` (nine typed read-only tools over stdio).
+  `mcp/server.py` (ten typed read-only tools over stdio).
 - **Does:** validates arguments, calls the repository, resolves attachments on
   demand, and encodes one compact JSON reply. Stdout carries protocol only.
 - **Attachments:** `attachments/resolver` opens the media file with a
@@ -158,7 +158,7 @@ Steps 6 and 7 run at query time and never touch the source databases.
 | WeChat media | Read through no-follow descriptors; never modified | `attachments/resolver.py` |
 | Private state | Owner-only, symlink-rejecting, atomic writes | `core/config.py` |
 | Query time | No decrypt, no import, no source read | `search/` reads the archive only |
-| MCP surface | Nine read-only tools; no SQL, shell, send or arbitrary path | `mcp/server.py` tool set |
+| MCP surface | Ten read-only tools; no SQL, shell, send or arbitrary path | `mcp/server.py` tool set |
 
 Setup is the one exception to "never touches WeChat". It launches a signed
 copy of the app under LLDB, once. See [setup.md](setup.md).

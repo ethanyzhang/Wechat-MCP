@@ -3,6 +3,8 @@ import ctypes as C
 from pathlib import Path
 
 LIBRARY = Path.home() / ".local/share/wechat-bridge/sqlcipher-4.19.0/lib/libsqlcipher.dylib"
+if not LIBRARY.is_file():  # a Homebrew SQLCipher works too, as in core.config.DEFAULT_LIBRARY
+    LIBRARY = Path("/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib")
 KEY = bytes(range(32))
 
 class Engine:

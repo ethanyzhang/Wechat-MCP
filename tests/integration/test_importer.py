@@ -14,11 +14,14 @@ def factory(cfg):
     return open_adapter(cfg, build='270102')
 
 
-def import_case(tmp_path):
-    return account_case(tmp_path, changes={
+def import_case(tmp_path, extra=None):
+    changes = {
         'message/message_0.db': f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(1,123,1,1,1700000000,'发票 invoice',0),(2,124,99,4,NULL,'unknown',0)",
         'message/message_1.db': f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(1,125,{(57<<32)|49},1,1700000001,x'{QUOTE.hex()}',0)",
-    })
+    }
+    for relative, sql in (extra or {}).items():
+        changes[relative] = changes.get(relative, '') + ';' + sql
+    return account_case(tmp_path, changes=changes)
 
 
 def active_rows(cfg, kind='messages'):

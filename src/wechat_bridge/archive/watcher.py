@@ -4,7 +4,7 @@ import math
 import os
 import time
 
-from ..adapters.wechat_4_1 import open_adapter
+from ..adapters.wechat_4_1 import ADAPTER_VERSION, open_adapter
 from ..core.config import check_private_fd
 from ..core.errors import BridgeError
 from .importer import refresh_archive
@@ -80,7 +80,8 @@ class ArchiveWatcher:
         status = Archive(config).status()
         if status['active_generation'] is None:
             raise BridgeError('archive_not_ready')
-        self._seen = status['source_fingerprint']
+        # An archive from another adapter version looks like a source change, so the first poll refreshes it.
+        self._seen = status['source_fingerprint'] if status.get('adapter_version') == ADAPTER_VERSION else None
         self._pending_since = None
         self._last_attempt = None
         self._not_before = -math.inf

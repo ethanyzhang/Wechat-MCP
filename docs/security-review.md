@@ -491,7 +491,7 @@ Recommended soon after release:
   normalises SDK validation errors so caller values are never echoed
   (`mcp/server.py:83-108`). Dataclass fields holding paths, keys and usernames
   use `repr=False`.
-- **MCP surface.** stdio only; no network listener; nine read-only tools with
+- **MCP surface.** stdio only; no network listener; ten read-only tools with
   `additionalProperties: false`, strict pydantic types and regex-checked IDs;
   attachment responses bounded to 8 MiB source / 12 MiB wire; resource template
   re-validates IDs through `valid_id` in the service layer.

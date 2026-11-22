@@ -180,4 +180,4 @@ class Archive:
                     'refresh_in_progress': bool(latest and latest['state'] == 'building'),
                     'counts': metadata.get('counts', {}), 'coverage': metadata.get('coverage', {}),
                     'source_observations': metadata.get('source_observations', {}),
-                    'adapter_status': metadata.get('adapter_status'), 'source_fingerprint': metadata.get('source_fingerprint')}
+                    'adapter_status': metadata.get('adapter_status'), 'adapter_version': metadata.get('adapter_version'), 'source_fingerprint': metadata.get('source_fingerprint')}

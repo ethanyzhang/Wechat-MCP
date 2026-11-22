@@ -4,7 +4,7 @@ from dataclasses import asdict
 import fcntl
 import os
 
-from ..adapters.wechat_4_1 import open_adapter
+from ..adapters.wechat_4_1 import ADAPTER_VERSION, open_adapter
 from ..adapters.schema import MSG_TABLE
 from ..core.config import check_private_fd, read_private_json
 from ..core.errors import BridgeError
@@ -110,7 +110,7 @@ def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
             if before != after:
                 raise BridgeError('source_changed')
             _checkpoint(cancel_event)
-            metadata = {'source_fingerprint': after, 'adapter_status': adapter.parse_status,
+            metadata = {'source_fingerprint': after, 'adapter_status': adapter.parse_status, 'adapter_version': ADAPTER_VERSION,
                         'source_observations': dict(adapter.observations),
                         'coverage': {'missing_message_tables': len(missing), 'missing_conversation_ids': missing,
                                      'mapped_message_tables': len(covered_tables),
@@ -146,6 +146,8 @@ def archive_status(config):
         error = None
     except BridgeError as issue:
         changed, error = True, issue.code
-    stale = status['active_generation'] is None or changed or bool(status['last_refresh_error']) or error is not None
-    return _public_status(status) | {'source_change_detected': changed, 'source_error': error,
+    # An archive imported by another adapter version lacks fields this one writes, so it is stale until refreshed.
+    outdated = status['active_generation'] is not None and status.get('adapter_version') != ADAPTER_VERSION
+    stale = status['active_generation'] is None or changed or outdated or bool(status['last_refresh_error']) or error is not None
+    return _public_status(status) | {'source_change_detected': changed, 'adapter_outdated': outdated, 'source_error': error,
                                     'stale': stale, 'ready_for_local_queries': status['active_generation'] is not None}

@@ -3,6 +3,7 @@
 Source usernames and membership come from structured records. Unknown formats
 retain diagnostics rather than inferred relationships.
 """
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import plistlib
 import hashlib
@@ -21,7 +22,7 @@ from .models import Contact, Conversation, Membership, SourceRef
 from .schema import SchemaDescriptor, MSG_TABLE, inspect_schema
 from .wire import parse_fields
 
-ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v2"
+ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v3"
 # 270135 (auto-update, 14 Oct 2026) was accepted on evidence that every required
 # table and column is identical to 270102; see docs/compatibility.md.
 SUPPORTED_BUILDS = frozenset({"270102", "270135", "270390"})  # local experiment: 270390 (4.2.0) keys verified OK
@@ -45,6 +46,35 @@ MIN_TIME = -62135596800
 MAX_TIME = 253402300799
 TIME_VALID = f"(typeof(create_time)='integer' AND create_time BETWEEN {MIN_TIME} AND {MAX_TIME})"
 TIME_SORT = f"(CASE WHEN {TIME_VALID} THEN create_time ELSE 0 END)"
+MAX_UNREAD = 1_000_000
+
+
+def session_activity(row, columns):
+    """Unread count, last-activity UTC time, its integer sort key and diagnostic codes from one SessionTable row.
+
+    A missing column gives `session_unread_unavailable`; a value that is not a plausible integer
+    (a bool, a negative count, a time outside 1..MAX_TIME seconds such as milliseconds) gives
+    `session_activity_invalid`. Neither ever guesses a value.
+    """
+    codes = []
+    unread = last = None
+    if "unread_count" not in columns or "last_timestamp" not in columns:
+        codes.append("session_unread_unavailable")
+    if "unread_count" in columns:
+        value = row.get("unread_count")
+        if type(value) is int and 0 <= value <= MAX_UNREAD:
+            unread = value
+        elif value is not None:
+            codes.append("session_activity_invalid")
+    stamp = None
+    if "last_timestamp" in columns:
+        value = row.get("last_timestamp")
+        if type(value) is int and 0 < value <= MAX_TIME:
+            last = value
+            stamp = (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=value)).isoformat()
+        elif value is not None and value != 0:
+            codes.append("session_activity_invalid")
+    return unread, stamp, (last if last is not None else -(1 << 63)), tuple(dict.fromkeys(codes))
 
 
 def select_adapter(build: str, schemas: tuple[SchemaDescriptor, ...]):
@@ -200,6 +230,7 @@ class Wechat41Adapter:
         member = self._schemas["contact/contact.db"].table("chatroom_member")
         supported = bool(member and member.has(MEMBER) and member.has_rowid)
         seen = set()
+        session_columns = frozenset(name for name, _ in self._schemas["session/session.db"].table("SessionTable").columns)
         for relative, table in (("session/session.db", "SessionTable"), ("contact/contact.db", "chat_room")):
             for row in self._rows(relative, table):
                 username = self._username(row["username"])
@@ -209,9 +240,11 @@ class Wechat41Adapter:
                 group = username.endswith("@chatroom")
                 contact = contacts.get(username)
                 membership = "recorded" if group and username in groups and supported else "unsupported"
+                activity = session_activity(row, session_columns) if table == "SessionTable" else (None, None, -(1 << 63), ())
                 yield Conversation(self.identities.conversation_id(username), "group" if group else "direct", username,
                                    contact.display_name if contact else None,
-                                   (self._source(relative, table, row),), membership, self.parse_status)
+                                   (self._source(relative, table, row),), membership, self.parse_status, activity[3],
+                                   activity[0], activity[1], activity[2])
 
     def conversation(self, conversation_id):
         """Return the single matching conversation; zero or several matches raise conversation_not_found."""

@@ -18,6 +18,8 @@ from .cursor import binding, encode_cursor, decode_cursor
 from .tokenize import normalize, match_expression, source_offset
 
 MAX_QUERY_BYTES = 8 * 1024 * 1024
+MAX_NAME_CHARACTERS = 256
+NO_ACTIVITY = -(1 << 63)
 AVAILABILITY_SQL = """CASE
 WHEN json_extract(r.data,'$.mapping_provenance')='conflicting' THEN 'identity_mismatch'
 WHEN json_extract(r.data,'$.mapping_provenance') NOT IN ('resource_hardlink','resource_layout','explicit_resource') THEN 'unsupported_format'
@@ -64,7 +66,7 @@ def timestamp(value):
 
 def public_record(record):
     """Strip source usernames, paths, file identity, digests and table names before a record leaves the process."""
-    result = {k: v for k, v in record.items() if k not in ('source_username', 'relative_path', 'file_identity', 'expected_digest', 'record_id')}
+    result = {k: v for k, v in record.items() if k not in ('source_username', 'relative_path', 'file_identity', 'expected_digest', 'record_id', 'last_sort')}
     for field in ('source', 'sources'):
         if field in result:
             values = result[field] if field == 'sources' else (result[field],)
@@ -149,7 +151,34 @@ class QueryRepository:
                 item['availability'] = attachment_availability(record)
                 item['verification_status'] = 'not_checked'
             items.append(item)
+        if kind == 'messages':
+            total = self._add_names(db, generation, items, total)
         return items
+
+    @staticmethod
+    def _add_names(db, generation, items, total):
+        """Add sender_display_name and conversation_display_name from the same generation.
+
+        One batched lookup per table and page; each name is cut to MAX_NAME_CHARACTERS and counted
+        in the page's byte total, so names cannot push a page past MAX_QUERY_BYTES.
+        """
+        for kind, id_field, name_field in (('contacts', 'sender_id', 'sender_display_name'),
+                                           ('conversations', 'conversation_id', 'conversation_display_name')):
+            ids = sorted({item[id_field] for item in items if item.get(id_field)})
+            names = {}
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for row in db.execute(f"SELECT record_id,json_extract(data,'$.display_name') FROM {kind} WHERE generation=? AND record_id IN ("
+                                      + ','.join('?' for _ in chunk) + ')', (generation, *chunk)):
+                    if isinstance(row[1], str) and row[1]:
+                        names[row[0]] = row[1][:MAX_NAME_CHARACTERS]
+            for item in items:
+                name = names.get(item.get(id_field))
+                item[name_field] = name
+                total += len(json.dumps(name, ensure_ascii=False).encode())
+                if total > MAX_QUERY_BYTES:
+                    raise BridgeError('content_too_large')
+        return total
 
     def _result(self, row, items, *, next_cursor=None):
         metadata = json.loads(row['metadata'])
@@ -181,19 +210,33 @@ class QueryRepository:
                 normalized, expression = match_expression(query, generation, kind)
                 where += ['r.record_id IN (SELECT record_id FROM record_search WHERE tokens MATCH ? AND instr(normalized,?)>0)']
                 params += [expression, normalized]
-            if last:
+            recent = kind == 'conversations' and filters.get('sort') == 'recent'
+            # Recent-first pages on a non-null integer key, so the boundary to conversations without
+            # activity needs no NULL comparison; the default order and its cursors are unchanged.
+            key_sql = f"COALESCE(json_extract(r.data,'$.last_sort'),{NO_ACTIVITY})"
+            if last and recent:
+                where += [f'({key_sql}<? OR ({key_sql}=? AND r.record_id>?))']; params += [last[0], last[0], last[1]]
+            elif last:
                 where += ['r.record_id>?']; params += [last[0]]
             for key, value in filters.items():
                 if value is None or key == 'query':
                     continue
-                if key == 'kind' and kind == 'conversations':
+                if key == 'unread_only' and kind == 'conversations':
+                    where += ["COALESCE(json_extract(r.data,'$.unread_count'),0)>0"]
+                elif key == 'sort':
+                    pass
+                elif key == 'kind' and kind == 'conversations':
                     where += ["json_extract(r.data,'$.kind')=?"]; params += [value]
                 elif key == 'availability':
                     where += [AVAILABILITY_SQL + '=?']; params += [value]
                 elif key in ('conversation_id', 'message_id', 'kind', 'representation'):
                     where += [f'r.{key}=?']; params += [value]
-            hits = db.execute(f'SELECT r.record_id FROM {kind} r WHERE ' + ' AND '.join(where) + ' ORDER BY r.record_id LIMIT ?', (*params, limit + 1)).fetchall()
-            selected, next_token = self._paginate(hits, limit, generation, bound, lambda last: [last['record_id']])
+            if recent:
+                hits = db.execute(f'SELECT r.record_id,{key_sql} AS sort_key FROM {kind} r WHERE ' + ' AND '.join(where) + ' ORDER BY sort_key DESC,r.record_id LIMIT ?', (*params, limit + 1)).fetchall()
+                selected, next_token = self._paginate(hits, limit, generation, bound, lambda last: [last['sort_key'], last['record_id']])
+            else:
+                hits = db.execute(f'SELECT r.record_id FROM {kind} r WHERE ' + ' AND '.join(where) + ' ORDER BY r.record_id LIMIT ?', (*params, limit + 1)).fetchall()
+                selected, next_token = self._paginate(hits, limit, generation, bound, lambda last: [last['record_id']])
             result = self._result(row, self._items(db, generation, kind, selected), next_cursor=next_token)
             return result
 
@@ -201,11 +244,23 @@ class QueryRepository:
         """Contacts by name substring, paginated by record ID; raises invalid_query, invalid_limit or invalid_cursor."""
         return self._list('contacts', query=query, limit=limit, cursor=cursor)
 
-    def list_conversations(self, query: str = '', *, kind: str | None = None, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
-        """Conversations by name substring, optionally filtered by direct or group; raises invalid_filter."""
-        if kind not in (None, 'direct', 'group'):
+    def list_conversations(self, query: str = '', *, kind: str | None = None, unread_only: bool = False, sort: str = 'name',
+                           limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
+        """Conversations by name substring, optionally filtered by direct or group or to those with unread messages.
+
+        sort is 'name' (record order, the default) or 'recent' (last activity, newest first). Archives
+        imported before activity was recorded have no unread or recency data until refreshed (see freshness.stale).
+        Raises invalid_filter.
+        """
+        if kind not in (None, 'direct', 'group') or type(unread_only) is not bool or sort not in ('name', 'recent'):
             raise BridgeError('invalid_filter')
-        return self._list('conversations', query=query, limit=limit, cursor=cursor, filters={'kind': kind})
+        filters = {'kind': kind}
+        # Only non-default options enter the cursor binding, so default-order cursors stay valid.
+        if unread_only:
+            filters['unread_only'] = True
+        if sort != 'name':
+            filters['sort'] = sort
+        return self._list('conversations', query=query, limit=limit, cursor=cursor, filters=filters)
 
     def get_group(self, conversation_id: str, *, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         """Group record plus locally observed membership page; raises group_not_found or conversation_not_found."""
@@ -221,8 +276,10 @@ class QueryRepository:
             selected, token = self._paginate(hits, limit, generation, bound, lambda last: [last['record_id']])
             return self._result(row, self._items(db, generation, 'membership', selected), next_cursor=token) | {'group': public_record(group)}
 
-    def _messages(self, query: str | None, *, conversation_id: str | None = None, sender_id: str | None = None, start: str | None = None, end: str | None = None, type: str | None = None, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
+    def _messages(self, query: str | None, *, conversation_id: str | None = None, sender_id: str | None = None, start: str | None = None, end: str | None = None, type: str | None = None, order: str = 'asc', limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         valid_limit(limit)
+        if order not in ('asc', 'desc'):
+            raise BridgeError('invalid_filter')
         normalized = query_text(query, required=True) if query is not None else None
         if conversation_id is not None:
             valid_id(conversation_id, 'conversation')
@@ -234,6 +291,9 @@ class QueryRepository:
         if lower is not None and upper is not None and lower > upper:
             raise BridgeError('invalid_time_range')
         filters = {'query': normalized, 'conversation_id': conversation_id, 'sender_id': sender_id, 'start': lower, 'end': upper, 'type': type}
+        newest_first = order == 'desc'
+        if newest_first:
+            filters['order'] = order  # only a non-default order enters the cursor binding
         bound = binding('search' if normalized is not None else 'timeline', filters, limit)
         with self._snapshot(token=cursor, bound=bound) as (db, row, last):
             generation = row['generation']
@@ -255,7 +315,8 @@ class QueryRepository:
                 after = '((position,length)>(?,?) OR ((position,length)=(?,?) AND (time_sort<? OR (time_sort=? AND record_id>?))))'
             else:
                 query_sql = 'SELECT m.record_id,m.time_sort FROM messages m WHERE ' + ' AND '.join(where)
-                args, order, after = params, 'time_sort ASC,record_id ASC', '(time_sort,record_id)>(?,?)'
+                args, order, after = ((params, 'time_sort DESC,record_id DESC', '(time_sort,record_id)<(?,?)') if newest_first
+                                      else (params, 'time_sort ASC,record_id ASC', '(time_sort,record_id)>(?,?)'))
             if last:
                 query_sql = 'SELECT * FROM (' + query_sql + ') WHERE ' + after
                 args += [last[0], last[1], last[0], last[1], last[2], last[2], last[3]] if normalized is not None else last
@@ -271,6 +332,13 @@ class QueryRepository:
     def search_messages(self, query: str, **filters) -> dict:
         """Literal substring search with optional conversation, sender, time and type filters; ranked, cursor-paginated."""
         return self._messages(query, **filters)
+
+    def recent_messages(self, start: str, *, end: str | None = None, type: str | None = None, sender_id: str | None = None,
+                        order: str = 'desc', limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
+        """Messages across all conversations in a time window, newest first by default; start is required and needs a timezone."""
+        if start is None:
+            raise BridgeError('invalid_time_range')
+        return self._messages(None, start=start, end=end, type=type, sender_id=sender_id, order=order, limit=limit, cursor=cursor)
 
     def get_messages(self, conversation_id: str, **filters) -> dict:
         """Chronological timeline of one conversation with the same filters as search; unsupported messages stay in."""
