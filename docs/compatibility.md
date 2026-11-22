@@ -72,7 +72,7 @@ are not independent ground truth, and counts differ from account to account.
 | Local coverage | Only conversations with a local message table had messages. Others had none locally |
 | Ordinary files | All retrieved with verification |
 | Images | Thumbnails decoded. Some originals were not local, and the local originals were unsupported WXGF |
-| MCP client | The SDK stdio client exercised all ten tools, binary and resource delivery, bounds and reconnect |
+| MCP client | The SDK stdio client exercised all nine tools, binary and resource delivery, bounds and reconnect |
 | Query latency | Warm p95 about 3 ms on the live archive and about 32 ms on 10,000 synthetic records |
 
 A later refresh observed `source_changed` during the scan. The bridge kept the

@@ -159,7 +159,7 @@ class QueryRepository:
     def _add_names(db, generation, items, total):
         """Add sender_display_name and conversation_display_name from the same generation.
 
-        One batched lookup per table and page; each name is cut to MAX_NAME_CHARACTERS and counted
+        One batched lookup per table and page; each name is cut to MAX_NAME_CHARACTERS in the query itself (so a huge stored name is never read) and counted
         in the page's byte total, so names cannot push a page past MAX_QUERY_BYTES.
         """
         for kind, id_field, name_field in (('contacts', 'sender_id', 'sender_display_name'),
@@ -168,10 +168,10 @@ class QueryRepository:
             names = {}
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
-                for row in db.execute(f"SELECT record_id,json_extract(data,'$.display_name') FROM {kind} WHERE generation=? AND record_id IN ("
+                for row in db.execute(f"SELECT record_id,substr(json_extract(data,'$.display_name'),1,{MAX_NAME_CHARACTERS}) FROM {kind} WHERE generation=? AND record_id IN ("
                                       + ','.join('?' for _ in chunk) + ')', (generation, *chunk)):
                     if isinstance(row[1], str) and row[1]:
-                        names[row[0]] = row[1][:MAX_NAME_CHARACTERS]
+                        names[row[0]] = row[1]
             for item in items:
                 name = names.get(item.get(id_field))
                 item[name_field] = name
@@ -357,7 +357,10 @@ class QueryRepository:
             previous = db.execute(base + '<(?,?) ORDER BY time_sort DESC,record_id DESC LIMIT ?', (generation, anchor['conversation_id'], sort, message_id, before)).fetchall()[::-1]
             following = db.execute(base + '>(?,?) ORDER BY time_sort,record_id LIMIT ?', (generation, anchor['conversation_id'], sort, message_id, after)).fetchall()
             hits = previous + [{'record_id': message_id}] + following
-            return self._result(row, self._items(db, generation, 'messages', hits)) | {'message': public_record(anchor)}
+            result = self._result(row, self._items(db, generation, 'messages', hits))
+            message = public_record(anchor)
+            self._add_names(db, generation, [message], 0)
+            return result | {'message': message}
 
     def list_attachments(self, message_id: str | None = None, *, kind: str | None = None, representation: str | None = None, availability: str | None = None, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         """Attachment metadata with an unverified availability label; raises invalid_filter."""

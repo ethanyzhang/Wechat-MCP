@@ -206,8 +206,10 @@ def test_message_results_carry_display_names_everywhere(tmp_path):
     found = repo.search_messages('invoice')['items'][0]
     assert (found['sender_display_name'], found['conversation_display_name']) == ('Same name', 'Fictional group')
     context = repo.get_context(found['message_id'])
-    assert context['message'].get('sender_display_name') is None  # the anchor record itself is unchanged
+    assert (context['message']['sender_display_name'], context['message']['conversation_display_name']) == ('Same name', 'Fictional group')
     assert all('conversation_display_name' in m for m in context['items'])
+    same = next(m for m in context['items'] if m['message_id'] == found['message_id'])
+    assert (same['sender_display_name'], same['conversation_display_name']) == (context['message']['sender_display_name'], context['message']['conversation_display_name'])
 
 
 def test_long_display_names_are_cut_and_counted(tmp_path, monkeypatch):
@@ -222,6 +224,19 @@ def test_long_display_names_are_cut_and_counted(tmp_path, monkeypatch):
     monkeypatch.setattr(repository, 'MAX_QUERY_BYTES', 2000)
     with pytest.raises(BridgeError, match='content_too_large'):
         repo.recent_messages('2023-11-14T00:00:00Z')
+
+
+def test_huge_stored_names_are_cut_in_the_query(tmp_path):
+    from wechat_bridge.archive.store import Archive
+    from wechat_bridge.search import repository
+    cfg, repo = activity_case(tmp_path)
+    huge = 'x' * 60000
+    with Archive(cfg).connection(write=True) as db:
+        db.execute("UPDATE contacts SET data=json_set(data,'$.display_name',?)", (huge,))
+        db.execute("UPDATE conversations SET data=json_set(data,'$.display_name',?)", (huge,))
+    items = repo.recent_messages('2023-11-14T00:00:00Z')['items']
+    assert items and all(len(m['sender_display_name'] or '') <= repository.MAX_NAME_CHARACTERS
+                         and len(m['conversation_display_name']) == repository.MAX_NAME_CHARACTERS for m in items)
 
 
 def test_timeline_without_a_conversation_uses_the_time_index(tmp_path):
