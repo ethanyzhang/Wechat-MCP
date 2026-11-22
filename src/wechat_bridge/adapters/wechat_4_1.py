@@ -24,7 +24,7 @@ from .wire import parse_fields
 ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v2"
 # 270135 (auto-update, 14 Oct 2026) was accepted on evidence that every required
 # table and column is identical to 270102; see docs/compatibility.md.
-SUPPORTED_BUILDS = frozenset({"270102", "270135"})
+SUPPORTED_BUILDS = frozenset({"270102", "270135", "270390"})  # local experiment: 270390 (4.2.0) keys verified OK
 INFO_PLIST = Path("/Applications/WeChat.app/Contents/Info.plist")
 CONTACT = {"id": "INTEGER", "username": "TEXT", "nick_name": "TEXT", "remark": "TEXT"}
 ROOM = {"id": "INTEGER", "username": "TEXT", "owner": "TEXT", "ext_buffer": "BLOB"}
@@ -107,7 +107,7 @@ def open_adapter(config: Config, *, build: str | None = None):
         try:
             with INFO_PLIST.open("rb") as stream:
                 info = plistlib.load(stream)
-            if info.get("CFBundleShortVersionString") != "4.1.15":
+            if info.get("CFBundleShortVersionString") not in ("4.1.15", "4.2.0"):  # local experiment
                 raise BridgeError("unsupported_build")
             build = info.get("CFBundleVersion")
         except (OSError, plistlib.InvalidFileException):
