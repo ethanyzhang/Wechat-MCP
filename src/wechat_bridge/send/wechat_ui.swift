@@ -39,26 +39,31 @@ func window() -> AXUIElement? { (attr(ax, kAXWindowsAttribute) as? [AXUIElement]
 func isFront() -> Bool { NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier }
 func run(_ path: String, _ args: [String]) { let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args; try? p.run(); p.waitUntilExit() }
 let systemWide = AXUIElementCreateSystemWide()
-/// Every mouse event is preceded by this check: WeChat frontmost and the element under the point inside WeChat's own
-/// (first) window, not merely in a WeChat process: another WeChat window covering the point fails it.
-func guardPoint(_ p: CGPoint) {
-    guard isFront(), let w = window() else { fail("wechat_not_frontmost") }
+/// Every mouse event is preceded by this check: WeChat frontmost and the element under the point is `target` itself or one of
+/// its descendants (target is an element of the window being driven). A different WeChat window or control covering the
+/// point therefore fails it.
+func guardPoint(_ p: CGPoint, within target: AXUIElement) {
+    guard isFront() else { fail("wechat_not_frontmost") }
     var hit: AXUIElement?
     guard AXUIElementCopyElementAtPosition(systemWide, Float(p.x), Float(p.y), &hit) == .success, var e = hit else { fail("target_obscured") }
     for _ in 0..<60 {
-        if CFEqual(e, w) { return }
+        if CFEqual(e, target) { return }
         guard let parent = attr(e, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
         e = parent as! AXUIElement
     }
     fail("target_obscured")
 }
-func moveMouse(_ p: CGPoint) { guardPoint(p); CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap) }
-/// One down/up pair. `recheck` runs after the pause and right before the press, with the point guard, so nothing that
-/// changed during the pause is acted on; between that last check and the press there is no sleep.
-func mouseClick(_ p: CGPoint, recheck: (() -> Void)? = nil) {
-    moveMouse(p); usleep(60_000)
+func moveMouse(_ p: CGPoint, within target: AXUIElement) { guardPoint(p, within: target); CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap) }
+/// Click the centre of `target`: one down/up pair. After the pause the target's geometry must be unchanged (a moved or
+/// resized window refuses), `recheck` runs, and the point guard runs again; between that last check and the press there is
+/// no sleep.
+func mouseClick(_ target: AXUIElement, recheck: (() -> Void)? = nil) {
+    guard let f = frameOf(target) else { fail("target_obscured") }
+    let p = CGPoint(x: f.midX, y: f.midY)
+    moveMouse(p, within: target); usleep(60_000)
+    guard let f2 = frameOf(target), f2 == f else { fail("state_changed") }
     recheck?()
-    guardPoint(p)
+    guardPoint(p, within: target)
     CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
     usleep(40_000)
     CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
@@ -116,8 +121,8 @@ case "open":
     if list() == nil, let wf = frameOf(w) {
         let bar = (children(w).first).map { children($0).filter { (attr($0, kAXRoleAttribute) as? String) == "AXButton" && ident($0).isEmpty } } ?? []
         let tabs = bar.compactMap { b in frameOf(b).map { (b, $0) } }.filter { $0.1.minX - wf.minX < 80 && $0.1.minX >= wf.minX }.sorted { $0.1.minY < $1.1.minY }
-        for (_, f) in tabs {
-            mouseClick(CGPoint(x: f.midX, y: f.midY))
+        for (btn, _) in tabs {
+            mouseClick(btn)
             usleep(UInt32((NSEvent.doubleClickInterval + 0.25) * 1_000_000))   // never two clicks inside the double-click interval
             if list() != nil { break }
         }
@@ -127,8 +132,8 @@ case "open":
     func scroll(_ lines: Int32) {
         guard let l = list(), let f = frameOf(l) else { return }
         let p = CGPoint(x: f.midX, y: f.midY)
-        moveMouse(p); usleep(40_000)
-        guardPoint(p)
+        moveMouse(p, within: l); usleep(40_000)
+        guardPoint(p, within: l)
         CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: lines, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap); usleep(120_000)
     }
     for _ in 0..<12 { scroll(30) }
@@ -137,7 +142,7 @@ case "open":
     guard row() != nil else { fail("chat_not_in_list") }
     for _ in 0..<30 {   // bring the whole row inside the list, then click once
         guard let l = list(), let rw = row(), let lf = frameOf(l), let rf = frameOf(rw) else { fail("chat_not_in_list") }
-        if rf.minY >= lf.minY && rf.maxY <= lf.maxY && rf.width > 0 { mouseClick(CGPoint(x: rf.midX, y: rf.midY)); out(["ok": true]) }
+        if rf.minY >= lf.minY && rf.maxY <= lf.maxY && rf.width > 0 { mouseClick(rw); out(["ok": true]) }
         scroll(rf.maxY > lf.maxY ? -1 : 1)
     }
     fail("chat_not_in_list")
@@ -153,14 +158,14 @@ case "click_send":
     let name = CommandLine.arguments[2], group = CommandLine.arguments[3] == "group"
     let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
     func verified() -> Bool {
-        guard let w2 = window(), let s = chatState(w2), (s["title"] as? String) == name, (s["count_label"] is String) == group,
+        guard let s = chatState(w), (s["title"] as? String) == name, (s["count_label"] is String) == group,
               (s["composer_text"] as? String) == text, (s["send_enabled"] as? Bool) == true else { return false }
         return true
     }
     guard verified() else { fail("state_changed") }
     guard let composer = findFresh(w, { ident($0) == "chat_input_field" }), let cf = frameOf(composer),
-          let b = sendButton(w, cf), let bf = frameOf(b) else { fail("send_control_not_found") }
-    mouseClick(CGPoint(x: bf.midX, y: bf.midY), recheck: { if !verified() { fail("state_changed") } })
+          let b = sendButton(w, cf) else { fail("send_control_not_found") }
+    mouseClick(b, recheck: { if !verified() { fail("state_changed") } })
     out(["ok": true])
 case "clear_composer":
     // clear_composer <name> <direct|group>, our text on stdin: clears only if, in this same run, the same chat is open and
