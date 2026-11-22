@@ -115,7 +115,12 @@ case "open":
     guard CommandLine.arguments.count == 3, let w = window() else { fail("usage") }
     let name = CommandLine.arguments[2]
     func list() -> AXUIElement? { findFresh(w) { ident($0) == "session_list" } }
-    func row() -> AXUIElement? { findFresh(w) { ident($0) == "session_item_" + name } }
+    // Rows are direct children of the list, so look there instead of walking the whole window tree: with a long chat open
+    // the tree walk hits its node budget before it reaches a row. Names are compared in canonical Unicode form.
+    func canon(_ s: String) -> String { s.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines) }
+    let want = canon(name)
+    func rows() -> [AXUIElement] { list().map { l in children(l).filter { ident($0).hasPrefix("session_item_") } } ?? [] }
+    func row() -> AXUIElement? { rows().first { canon(String(ident($0).dropFirst("session_item_".count))) == want } }
     // Any starting tab: when the chat list is not showing, click the left-bar tab buttons (real clicks, relative to the
     // window's own frame) until it appears. A chat list with no chat selected counts as showing.
     if list() == nil, let wf = frameOf(w) {
@@ -136,16 +141,26 @@ case "open":
         guardPoint(p, within: l)
         CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: lines, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap); usleep(120_000)
     }
+    // Counts only, never names: how many rows were ever exposed, scroll steps, and whether the list end was reached.
+    var steps = 0, seen = 0, atEnd = false
+    func diag(_ code: String) -> Never { out(["error": code, "diag": "rows_now=\(rows().count) rows_max=\(seen) steps=\(steps) at_end=\(atEnd) list=\(list() != nil) front=\(isFront())"]) }
     for _ in 0..<12 { scroll(30) }
-    var steps = 0
-    while row() == nil && steps < 80 { scroll(-4); steps += 1 }
-    guard row() != nil else { fail("chat_not_in_list") }
+    var lastFirst = "", still = 0
+    while row() == nil && steps < 300 {
+        let rs = rows(); seen = max(seen, rs.count)
+        let first = rs.first.map { ident($0) } ?? "", last = rs.last.map { ident($0) } ?? ""
+        still = (first + "|" + last == lastFirst) ? still + 1 : 0   // the exposed window stopped moving: end of the list
+        lastFirst = first + "|" + last
+        if still >= 3 { atEnd = true; break }
+        scroll(-4); steps += 1
+    }
+    guard row() != nil else { diag("chat_not_in_list") }
     for _ in 0..<30 {   // bring the whole row inside the list, then click once
-        guard let l = list(), let rw = row(), let lf = frameOf(l), let rf = frameOf(rw) else { fail("chat_not_in_list") }
+        guard let l = list(), let rw = row(), let lf = frameOf(l), let rf = frameOf(rw) else { diag("chat_not_in_list") }
         if rf.minY >= lf.minY && rf.maxY <= lf.maxY && rf.width > 0 { mouseClick(rw); out(["ok": true]) }
         scroll(rf.maxY > lf.maxY ? -1 : 1)
     }
-    fail("chat_not_in_list")
+    diag("row_not_visible")
 case "set_composer":
     guard let w = window(), let c = findFresh(w, { ident($0) == "chat_input_field" }) else { fail("ui_unavailable") }
     let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""

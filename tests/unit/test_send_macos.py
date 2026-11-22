@@ -104,3 +104,17 @@ def test_clear_composer_carries_the_expected_chat_and_text(tmp_path):
     d.clear_composer('A', 'group', 'mine')
     args, kwargs = runner.calls[-1]
     assert args[1:] == ['clear_composer', 'A', 'group'] and kwargs['input'] == 'mine'
+
+
+def test_open_failure_keeps_its_code_and_logs_only_the_counts_the_helper_reports(tmp_path, capsys):
+    reply = {'error': 'chat_not_in_list', 'diag': 'rows_now=9 rows_max=9 steps=300 at_end=True list=True front=True'}
+    d, _ = driver(tmp_path, [reply])
+    with pytest.raises(UiError) as caught:
+        d.open_chat('小逸')
+    assert caught.value.code == 'chat_not_in_list'
+    err = capsys.readouterr().err
+    assert 'rows_max=9' in err and '小逸' not in err
+    d, _ = driver(tmp_path, [{'error': 'row_not_visible'}])
+    with pytest.raises(UiError) as caught:
+        d.open_chat('小逸')
+    assert caught.value.code == 'row_not_visible'
