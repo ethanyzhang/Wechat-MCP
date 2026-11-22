@@ -143,7 +143,7 @@ tool keeps its read-only annotation.
   bridge process of the user) records an attempt before Send is used and a result after: time, conversation ID, a keyed
   HMAC of the text and its length, never the text. A refusal after the chat was opened is logged too. At most
   one send per 3 seconds and 30 per hour (attempts count, even unresolved ones), and the same text to the same
-  conversation is refused for 10 minutes (an attempt that was refused before Send was pressed no longer counts). A
+  conversation is refused for 10 minutes (an attempt that was refused before Send was pressed no longer counts; the duplicate window only recognizes repeats made through the same state directory, because the text digest is keyed per state directory, while the interval and hourly cap are shared by all). If the log ever holds a damaged line (a crash mid-write), sends are refused with `send_log_unavailable` until that line is deleted by hand. A
   `send.lock` next to the log serializes sends across processes; a send waits at most 30 seconds for it (`refused_busy`). These are guards against a runaway loop, not WeChat rules.
 - **Permission.** The Accessibility grant belongs to the app that launches the bridge (for example Claude.app) and
   covers everything that app runs. The tool returns `refused_no_accessibility` when it is missing. The UI helper

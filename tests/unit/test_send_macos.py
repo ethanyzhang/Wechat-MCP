@@ -16,6 +16,8 @@ class Runner:
     def __call__(self, args, **kwargs):
         self.calls.append((args, kwargs))
         if args[0] == 'swiftc':
+            if isinstance(self.compile_ok, Exception):
+                raise self.compile_ok
             if self.compile_ok:
                 open(args[args.index('-o') + 1], 'w').close()
             return SimpleNamespace(returncode=0 if self.compile_ok else 1, stdout='', stderr='')
@@ -76,3 +78,29 @@ def test_state_is_coerced_and_junk_fields_become_none(tmp_path):
     assert (state.title, state.count_label, state.composer_text, state.send_enabled, state.bubbles) == ('A', None, None, None, ('x',))
     with pytest.raises(UiError):
         d.state()
+
+
+@pytest.mark.parametrize('failure', [False, FileNotFoundError('swiftc'), subprocess.TimeoutExpired('swiftc', 300), PermissionError('x')])
+def test_build_failures_are_normalized_and_prepare_never_raises(tmp_path, failure):
+    d, _ = driver(tmp_path, [], compile_ok=failure)
+    d.prepare()
+    with pytest.raises(UiError) as info:
+        d.activate()
+    assert info.value.code == 'ui_unavailable'
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith('wechat-ui-build-')]   # no leftover temporary files
+
+
+def test_overlapping_builds_compile_once(tmp_path):
+    import threading
+    d, runner = driver(tmp_path, [{'ok': True}, {'ok': True}])
+    threads = [threading.Thread(target=d.prepare) for _ in range(4)] + [threading.Thread(target=d.activate)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert [c[0][0] for c in runner.calls].count('swiftc') == 1
+
+
+def test_clear_composer_carries_the_expected_chat_and_text(tmp_path):
+    d, runner = driver(tmp_path, [{'ok': True}])
+    d.clear_composer('A', 'group', 'mine')
+    args, kwargs = runner.calls[-1]
+    assert args[1:] == ['clear_composer', 'A', 'group'] and kwargs['input'] == 'mine'

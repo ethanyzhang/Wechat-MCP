@@ -2,7 +2,8 @@
 
 Both live in one fixed per-user directory, so every bridge process on the machine shares one lock and one history:
 the rate limit and the duplicate window cannot be multiplied by registering the bridge with several state directories.
-(Digests are keyed by the account's identity key; two registrations of the same account share it.)
+Digests are keyed by the identity key of the state directory (a random per-directory secret), so the duplicate window only
+recognizes repeats made through the same state directory; the interval and the hourly cap are shared by all of them.
 """
 from contextlib import contextmanager
 import fcntl
@@ -20,7 +21,9 @@ MIN_INTERVAL_SECONDS = 3
 MAX_PER_HOUR = 30
 DUPLICATE_SECONDS = 600
 LOCK_WAIT_SECONDS = 30
-TAIL_BYTES = 65536
+# One event per 3 s at most, so an hour holds at most ~1200 events of <300 bytes (~360 KB): this window always covers the
+# whole hour the hourly cap looks at, however many refusals are logged.
+TAIL_BYTES = 4 * 1024 * 1024
 LOG_NAME = 'send-log.jsonl'
 DEFAULT_DIR = Path.home() / 'Library/Application Support/WechatBridgeSend'
 
@@ -50,6 +53,12 @@ def send_lock(directory: Path = DEFAULT_DIR, *, wait=LOCK_WAIT_SECONDS, sleep=ti
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def _last_byte(path: Path) -> bytes:
+    with path.open('rb') as stream:
+        stream.seek(-1, os.SEEK_END)
+        return stream.read(1)
 
 
 class SendLog:
@@ -113,6 +122,8 @@ class SendLog:
         try:
             check_private_fd(fd)
             data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+            if os.fstat(fd).st_size and _last_byte(self.path) != b'\n':
+                data = b'\n' + data   # never glue a record onto an unfinished line from an earlier crash
             view = memoryview(data)
             while view:   # os.write may be short; the record is complete or the send does not happen
                 view = view[os.write(fd, view):]

@@ -110,11 +110,10 @@ class Sender:
         return {'state': 'unconfirmed', 'note': 'The message may or may not have been sent; do not resend. Check the chat.'}
 
     def _clear_if_ours(self, name, kind, text):
-        """Empty the composer only while it still holds our text in the chat we wrote it to; never touch anyone else's draft."""
+        """Take our text back out. The driver checks chat and contents in the same step it clears, so a chat switch between
+        a check and the write cannot erase someone else's draft."""
         try:
-            state = self.driver.state()
-            if title_matches(state, name, kind) and state.composer_text == text:
-                self.driver.set_composer('')
+            self.driver.clear_composer(name, kind, text)
         except Exception:
             pass
 

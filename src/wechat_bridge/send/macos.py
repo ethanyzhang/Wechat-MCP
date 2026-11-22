@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
+import threading
 
 from .driver import PressUncertain, UiError, WindowState
 
@@ -20,7 +22,7 @@ KNOWN_CODES = {'no_accessibility', 'wechat_not_running', 'wechat_not_frontmost',
 
 class MacDriver:
     def __init__(self, config, *, runner=subprocess.run):
-        self.config, self.runner, self._binary = config, runner, None
+        self.config, self.runner, self._binary, self._lock = config, runner, None, threading.Lock()
 
     def prepare(self) -> None:
         """Compile the helper now (called at server start) so the first approved send does not wait for swiftc."""
@@ -30,18 +32,25 @@ class MacDriver:
             pass  # A failure is reported again, as a refusal, when a send needs the helper.
 
     def _helper(self) -> Path:
-        if self._binary is None:
-            source = SOURCE.read_bytes()
-            binary = self.config.state_dir / ('wechat-ui-' + hashlib.sha256(source).hexdigest()[:16])
-            if not binary.is_file():
-                temp = binary.with_suffix('.tmp')
-                result = self.runner(['swiftc', '-O', '-o', str(temp), str(SOURCE)], capture_output=True, timeout=300)
-                if result.returncode != 0:
-                    temp.unlink(missing_ok=True)
-                    raise UiError('ui_unavailable')
-                os.replace(temp, binary)
-            self._binary = binary
-        return self._binary
+        with self._lock:   # one build at a time in this process; the unique temporary name covers other processes
+            if self._binary is None:
+                try:
+                    source = SOURCE.read_bytes()
+                    binary = self.config.state_dir / ('wechat-ui-' + hashlib.sha256(source).hexdigest()[:16])
+                    if not binary.is_file():
+                        descriptor, temp = tempfile.mkstemp(dir=self.config.state_dir, prefix='wechat-ui-build-')
+                        os.close(descriptor)
+                        try:
+                            result = self.runner(['swiftc', '-O', '-o', temp, str(SOURCE)], capture_output=True, timeout=300)
+                            if result.returncode != 0:
+                                raise UiError('ui_unavailable')
+                            os.replace(temp, binary)
+                        finally:
+                            Path(temp).unlink(missing_ok=True)
+                except (OSError, subprocess.SubprocessError):
+                    raise UiError('ui_unavailable') from None
+                self._binary = binary
+            return self._binary
 
     def _call(self, *args, stdin: str | None = None, timeout=STEP_TIMEOUT, pressing=False) -> dict:
         """One helper run. A reply carrying an error code is a UiError (the helper reports errors only before it acts).
@@ -82,6 +91,9 @@ class MacDriver:
 
     def set_composer(self, text: str) -> None:
         self._call('set_composer', stdin=text)
+
+    def clear_composer(self, name: str, kind: str, text: str) -> None:
+        self._call('clear_composer', name, kind, stdin=text)
 
     def click_send(self, name: str, kind: str, text: str) -> None:
         self._call('click_send', name, kind, stdin=text, pressing=True)

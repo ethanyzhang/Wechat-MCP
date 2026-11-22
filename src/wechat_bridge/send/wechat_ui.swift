@@ -39,22 +39,30 @@ func window() -> AXUIElement? { (attr(ax, kAXWindowsAttribute) as? [AXUIElement]
 func isFront() -> Bool { NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier }
 func run(_ path: String, _ args: [String]) { let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args; try? p.run(); p.waitUntilExit() }
 let systemWide = AXUIElementCreateSystemWide()
-/// Every mouse event is preceded by this check: WeChat frontmost and the element under the point belongs to WeChat.
+/// Every mouse event is preceded by this check: WeChat frontmost and the element under the point inside WeChat's own
+/// (first) window, not merely in a WeChat process: another WeChat window covering the point fails it.
 func guardPoint(_ p: CGPoint) {
-    guard isFront() else { fail("wechat_not_frontmost") }
+    guard isFront(), let w = window() else { fail("wechat_not_frontmost") }
     var hit: AXUIElement?
-    guard AXUIElementCopyElementAtPosition(systemWide, Float(p.x), Float(p.y), &hit) == .success, let h = hit else { fail("target_obscured") }
-    var pid: pid_t = 0
-    AXUIElementGetPid(h, &pid)
-    guard pid == app.processIdentifier else { fail("target_obscured") }
+    guard AXUIElementCopyElementAtPosition(systemWide, Float(p.x), Float(p.y), &hit) == .success, var e = hit else { fail("target_obscured") }
+    for _ in 0..<60 {
+        if CFEqual(e, w) { return }
+        guard let parent = attr(e, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+        e = parent as! AXUIElement
+    }
+    fail("target_obscured")
 }
 func moveMouse(_ p: CGPoint) { guardPoint(p); CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap) }
-func mouseClick(_ p: CGPoint) {   // exactly one down/up pair
+/// One down/up pair. `recheck` runs after the pause and right before the press, with the point guard, so nothing that
+/// changed during the pause is acted on; between that last check and the press there is no sleep.
+func mouseClick(_ p: CGPoint, recheck: (() -> Void)? = nil) {
     moveMouse(p); usleep(60_000)
-    guardPoint(p)   // re-check right before the press: focus can change during the pause
-    for t in [CGEventType.leftMouseDown, .leftMouseUp] {
-        CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap); usleep(60_000)
-    }
+    recheck?()
+    guardPoint(p)
+    CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+    usleep(40_000)
+    CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+    usleep(60_000)
 }
 func str(_ e: AXUIElement?, _ a: String = kAXValueAttribute) -> String? { e.flatMap { attr($0, a) as? String } }
 
@@ -144,10 +152,24 @@ case "click_send":
     guard CommandLine.arguments.count == 4, let w = window() else { fail("usage") }
     let name = CommandLine.arguments[2], group = CommandLine.arguments[3] == "group"
     let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    guard let s = chatState(w), (s["title"] as? String) == name, (s["count_label"] is String) == group,
-          (s["composer_text"] as? String) == text, (s["send_enabled"] as? Bool) == true else { fail("state_changed") }
+    func verified() -> Bool {
+        guard let w2 = window(), let s = chatState(w2), (s["title"] as? String) == name, (s["count_label"] is String) == group,
+              (s["composer_text"] as? String) == text, (s["send_enabled"] as? Bool) == true else { return false }
+        return true
+    }
+    guard verified() else { fail("state_changed") }
     guard let composer = findFresh(w, { ident($0) == "chat_input_field" }), let cf = frameOf(composer),
           let b = sendButton(w, cf), let bf = frameOf(b) else { fail("send_control_not_found") }
-    mouseClick(CGPoint(x: bf.midX, y: bf.midY)); out(["ok": true])
+    mouseClick(CGPoint(x: bf.midX, y: bf.midY), recheck: { if !verified() { fail("state_changed") } })
+    out(["ok": true])
+case "clear_composer":
+    // clear_composer <name> <direct|group>, our text on stdin: clears only if, in this same run, the same chat is open and
+    // the composer still holds exactly that text.
+    guard CommandLine.arguments.count == 4, let w = window() else { fail("usage") }
+    let name = CommandLine.arguments[2], group = CommandLine.arguments[3] == "group"
+    let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard let s = chatState(w), (s["title"] as? String) == name, (s["count_label"] is String) == group,
+          (s["composer_text"] as? String) == text, let c = findFresh(w, { ident($0) == "chat_input_field" }) else { fail("state_changed") }
+    AXUIElementSetAttributeValue(c, kAXValueAttribute as CFString, "" as CFString) == .success ? out(["ok": true]) : fail("ui_unavailable")
 default: fail("usage")
 }

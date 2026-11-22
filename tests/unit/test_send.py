@@ -32,6 +32,11 @@ class Fake:
         if not self.set_ignored:
             self.composer = text
         if self.on_set: self.on_set(self)
+    def clear_composer(self, name, kind, text):
+        self.calls.append('clear')
+        if self.title == name and self.composer == text:
+            self.composer = ''
+
     def click_send(self, name, kind, text):
         self.calls.append('click')
         if self.press_error:
@@ -208,7 +213,7 @@ def test_refusal_never_clears_a_draft_in_another_chat(tmp_path):
     driver.on_set = switch
     sender, driver, *_ = build(tmp_path, driver)
     assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_composer_mismatch'
-    assert driver.composer == 'bob draft' and driver.calls[-1] == 'set:hi'
+    assert driver.composer == 'bob draft' and 'clear' in driver.calls
 
 
 def test_state_error_after_the_write_clears_the_composer(tmp_path):
@@ -284,3 +289,26 @@ def test_send_lock_times_out_when_another_send_holds_it(tmp_path):
             with send_lock(tmp_path, wait=1, sleep=lambda s: None, clock=lambda: next(ticks)):
                 pass
         assert code(contend) == 'refused_busy'
+
+
+def test_a_long_run_of_refusals_cannot_push_recent_attempts_out_of_the_throttle_window(tmp_path):
+    clock = [1000.0]
+    log = SendLog(tmp_path, KEY, clock=lambda: clock[0])
+    for index in range(MAX_PER_HOUR - 1):
+        log.attempt(CONV, f'a{index}')
+    for _ in range(4000):   # far more refusal records than the old 64 KiB window could hold
+        log.refused(CONV)
+    clock[0] += 10
+    log.attempt(CONV, 'last')
+    clock[0] += 10
+    assert code(lambda: log.check_allowed(CONV, 'next')) == 'throttled'
+
+
+def test_a_record_is_never_glued_onto_an_unfinished_line(tmp_path):
+    log = SendLog(tmp_path, KEY, clock=lambda: 1000.0)
+    log.attempt(CONV, 'a')
+    with log.path.open('ab') as stream:
+        stream.write(b'{"half')
+    log.attempt(CONV, 'b')
+    lines = log.path.read_text().splitlines()
+    assert json.loads(lines[0])['event'] == 'attempt' and lines[1] == '{"half' and json.loads(lines[2])['event'] == 'attempt'
