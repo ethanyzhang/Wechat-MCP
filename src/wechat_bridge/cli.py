@@ -47,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("--limit", type=int, default=DEFAULT_RECORDS)
     serve = subs.add_parser("serve")
     serve.add_argument("--no-watch", action="store_true")
+    serve.add_argument("--enable-send", action="store_true", help="also register the text-only send_message tool (drives the WeChat app; see docs/mcp.md)")
     watch = subs.add_parser("archive-watch")
     watch.add_argument("--debounce-seconds", type=float, default=1.0)
     watch.add_argument("--reconcile-seconds", type=float, default=60.0)
@@ -65,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             result = doctor(args.state_dir)
         elif args.command == "serve":
             from .mcp.server import serve
-            serve(load_config(args.state_dir), watch=not args.no_watch)
+            serve(load_config(args.state_dir), watch=not args.no_watch, enable_send=args.enable_send)
             return 0
         elif args.command == "search-index":
             from .archive.store import Archive

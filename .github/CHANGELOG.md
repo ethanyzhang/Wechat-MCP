@@ -8,6 +8,8 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ### Added
 
+- `serve --enable-send` registers `send_message`, a text-only send through the open WeChat app (Accessibility, no keystrokes,
+  per-call approval, attempt log, throttle). Off by default; see docs/mcp.md, Sending.
 - `list_conversations` returns `unread_count` and `last_timestamp`, and takes
   `unread_only` and `sort=recent` (newest activity first). A session table without
   the columns reports `session_unread_unavailable` instead of a silent null.

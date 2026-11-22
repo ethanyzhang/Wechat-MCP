@@ -519,6 +519,12 @@ Recommended soon after release:
 
 ## 7. Residual risk
 
+- With `serve --enable-send` the bridge is no longer read-only: `send_message` types a text message into the WeChat
+  app through Accessibility. The threat is prompt injection from retrieved message text causing a send, and a
+  wrong-chat send. Controls: the tool exists only behind the flag; per-call client approval is required and documented;
+  recipient name, kind and window title are bound and verified; no keystrokes; a durable attempt log, throttle and
+  duplicate window; the Accessibility grant covers all of the host app. The sender fails closed, but its UI checks
+  rest on WeChat's accessibility tree (see docs/mcp.md, Sending).
 - Same-user compromise is out of the bridge's threat model: keys, the identity
   secret and the plaintext archive are readable by any process of that user (H-1).
 - Untrusted content from contacts reaches the client's LLM context by design

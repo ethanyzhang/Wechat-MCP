@@ -262,6 +262,33 @@ class QueryRepository:
             filters['sort'] = sort
         return self._list('conversations', query=query, limit=limit, cursor=cursor, filters=filters)
 
+    def resolve_recipient(self, conversation_id: str) -> dict:
+        """Display name and kind of one conversation, plus how many distinct contacts and conversations share that name.
+
+        Used by the send path to bind a send to one unambiguous recipient: the name is the full stored display
+        name (never cut), name_count counts every distinct contact and conversation with that exact name in the active
+        generation. Raises invalid_id, conversation_not_found or archive_not_ready.
+        """
+        valid_id(conversation_id, 'conversation')
+        with self._snapshot() as (db, row, _):
+            generation = row['generation']
+            record = self._record(db, generation, 'conversations', conversation_id)
+            name = record.get('display_name')
+            count = 0
+            if isinstance(name, str) and name:
+                # The conversation itself and its own contact row (same source username) are one entity, not two.
+                own = record.get('source_username')
+                count = db.execute("SELECT COUNT(*) FROM conversations WHERE generation=? AND json_extract(data,'$.display_name')=?",
+                                   (generation, name)).fetchone()[0]
+                count += db.execute("SELECT COUNT(*) FROM contacts WHERE generation=? AND json_extract(data,'$.display_name')=? "
+                                    "AND COALESCE(json_extract(data,'$.source_username'),'')<>?", (generation, name, own or '')).fetchone()[0]
+            return {'display_name': name if isinstance(name, str) and name else None, 'kind': record.get('kind'), 'name_count': count}
+
+    @property
+    def identity_key(self) -> bytes:
+        """Keyed-digest secret shared with cursors; the send log uses it so text digests cannot be guessed offline."""
+        return self._key
+
     def get_group(self, conversation_id: str, *, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         """Group record plus locally observed membership page; raises group_not_found or conversation_not_found."""
         valid_id(conversation_id, 'conversation'); valid_limit(limit)
