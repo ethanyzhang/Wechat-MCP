@@ -85,6 +85,14 @@ def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
     """
     archive = Archive(config)
     with import_lock(config):
+        # A process that cannot read the source (for example a lane server without Full Disk Access) must not touch the shared
+        # archive: no generation is begun, so it neither records a failure over the real servers' status nor publishes.
+        try:
+            source_fingerprint(config)
+        except BridgeError as error:
+            if error.code == 'source_unreadable':
+                return _public_status(archive.status()) | {'status': 'failed', 'error': error.code}
+            raise
         registry_path = config.state_dir / 'inventory.json'
         registry = read_private_json(registry_path) if registry_path.exists() else None
         account_id = registry['account_id'] if registry else discover(config).account_id

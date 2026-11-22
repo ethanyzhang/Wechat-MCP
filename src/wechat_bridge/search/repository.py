@@ -99,7 +99,7 @@ class QueryRepository:
     def __init__(self, config: Config):
         self.config, self.archive = config, Archive(config)
         with self.archive.connection() as db:
-            if db.execute('PRAGMA user_version').fetchone()[0] != 2:
+            if db.execute('PRAGMA user_version').fetchone()[0] not in (2, 3):
                 raise BridgeError('search_not_ready')
         self._key = load_identity_key(config)
 

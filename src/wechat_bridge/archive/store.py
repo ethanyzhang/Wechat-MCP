@@ -16,6 +16,10 @@ KINDS = {'contacts': 'contact_id', 'conversations': 'conversation_id',
 
 
 # Moments tables and their dedicated columns (author/time/text for filtering and sorting, like messages).
+# user_version: 1 no search index yet, 2 search index (older code), 3 search index plus Moments. Older code refuses version 3,
+# so a process still running pre-Moments code cannot publish a generation without Moments over this archive.
+FTS_READY = (2, 3)
+
 MOMENT_KINDS = {'moments': ', author_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL, text TEXT, text_normalized TEXT',
                 'moment_notifications': ', moment_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL'}
 
@@ -28,8 +32,9 @@ def encode(value):
 class Archive:
     """SQLite archive of generations; readers see only the generation archive_state points to.
 
-    The file is owner-only and opened with O_NOFOLLOW. Schema versions 0 to 2 are accepted; the Moments tables are
-    added to older archives on open (CREATE IF NOT EXISTS, same transaction), so no version bump is needed.
+    The file is owner-only and opened with O_NOFOLLOW. Schema versions 0 to 3 are accepted; the Moments tables are
+    added to older archives on open (CREATE IF NOT EXISTS, same transaction) and a version 2 archive moves to 3, which
+    locks out older code that would publish generations without Moments.
     """
     def __init__(self, config: Config):
         self.config = config
@@ -44,12 +49,14 @@ class Archive:
         with self.connection(write=True) as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             existing_schema = db.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone()
-            if version not in (0, 1, 2) or version == 0 and not empty and existing_schema:
+            if version not in (0, 1, 2, 3) or version == 0 and not empty and existing_schema:
                 raise BridgeError('unsupported_archive_schema')
             if version == 0:
                 self._create(db)
             else:
                 self._create_moment_tables(db)
+                if version == 2:
+                    db.execute('PRAGMA user_version=3')
 
     @contextmanager
     def connection(self, *, write=False):
@@ -160,7 +167,7 @@ class Archive:
                     values += [record['moment_id'], record['utc_timestamp'], record['time_sort']]
                 db.execute(f'INSERT INTO {kind} VALUES(' + ','.join('?' for _ in values) + ')', values)
             # Version 2 archives keep the search index in step with each batch.
-            if db.execute('PRAGMA user_version').fetchone()[0] == 2:
+            if db.execute('PRAGMA user_version').fetchone()[0] in FTS_READY:
                 from ..search.index import index_records
                 index_records(db, generation, kind, records)
 

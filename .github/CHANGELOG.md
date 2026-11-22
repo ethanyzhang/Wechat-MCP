@@ -6,6 +6,12 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- The archive moves to schema version 3 on first open: older code refuses it, so a still-running older server cannot publish a
+  generation without Moments over it. A refresh in a process that cannot read the WeChat folder now returns `source_unreadable`
+  without touching the archive (no failed generation is recorded). Rolling back to an older pin needs the archive rebuilt.
+
 ### Added
 
 - Read-only Moments tools `list_moments`, `get_moment` and `list_moment_notifications` over the optional `sns/sns.db`, with a field

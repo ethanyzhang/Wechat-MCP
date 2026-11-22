@@ -215,11 +215,11 @@ def test_an_existing_archive_without_moments_tables_gains_them_when_opened(tmp_p
     db.executescript('DROP TABLE moments; DROP TABLE moment_notifications;')
     db.commit(); db.close()
     version = sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0]
-    assert version in (1, 2)
+    assert version in (2, 3)
     Archive(cfg)   # opening migrates in place
     db = sqlite3.connect(path)
     assert {'moments', 'moment_notifications'} <= {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert db.execute('PRAGMA user_version').fetchone()[0] == version
+    assert db.execute('PRAGMA user_version').fetchone()[0] == 3   # version 2 moves to 3: older code can no longer open it
     assert repository(cfg).list_moments()['items'] == []   # pre-feature generation: queryable, empty, no Moments coverage entry
     assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
 
@@ -306,3 +306,22 @@ def test_cancellation_is_checked_while_the_feed_is_scanned_and_a_failed_discard_
     monkeypatch.setattr(Archive, 'discard', failing)
     status = refresh_archive(cfg, adapter_factory=broken)
     assert status['status'] == 'failed' and status['error'] == 'moments_discard_failed'
+
+
+def test_a_process_that_cannot_read_the_source_leaves_the_archive_untouched(tmp_path, monkeypatch):
+    from wechat_bridge.archive import importer
+    from wechat_bridge.archive.store import Archive
+    from wechat_bridge.core.errors import BridgeError
+    cfg = import_case(tmp_path)
+    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+    before = Archive(cfg).status()
+    generations = sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('SELECT count(*) FROM generations').fetchone()[0]
+    def unreadable(config):
+        raise BridgeError('source_unreadable')
+    monkeypatch.setattr(importer, 'source_fingerprint', unreadable)
+    result = importer.refresh_archive(cfg, adapter_factory=factory)
+    assert (result['status'], result['error']) == ('failed', 'source_unreadable')
+    after = Archive(cfg).status()
+    assert after['active_generation'] == before['active_generation'] and after['last_refresh_error'] == before['last_refresh_error']
+    assert sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('SELECT count(*) FROM generations').fetchone()[0] == generations
+    assert sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('PRAGMA user_version').fetchone()[0] == 3
