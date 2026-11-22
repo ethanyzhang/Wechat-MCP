@@ -16,7 +16,7 @@ KINDS = {'contacts': 'contact_id', 'conversations': 'conversation_id',
 
 
 # Moments tables and their dedicated columns (author/time/text for filtering and sorting, like messages).
-MOMENT_KINDS = {'moments': ', author_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL, text TEXT',
+MOMENT_KINDS = {'moments': ', author_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL, text TEXT, text_normalized TEXT',
                 'moment_notifications': ', moment_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL'}
 
 
@@ -154,7 +154,8 @@ class Archive:
                 elif kind in ('membership', 'replies'):
                     values += [record['conversation_id']]
                 elif kind == 'moments':
-                    values += [record['author_id'], record['utc_timestamp'], record['time_sort'], record['text']]
+                    from ..search.tokenize import normalize   # documented function-local exception (tests/unit/test_layering.py)
+                    values += [record['author_id'], record['utc_timestamp'], record['time_sort'], record['text'], normalize(record['text'] or '')]
                 elif kind == 'moment_notifications':
                     values += [record['moment_id'], record['utc_timestamp'], record['time_sort']]
                 db.execute(f'INSERT INTO {kind} VALUES(' + ','.join('?' for _ in values) + ')', values)

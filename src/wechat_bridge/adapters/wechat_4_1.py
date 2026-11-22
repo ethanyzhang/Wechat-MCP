@@ -47,7 +47,8 @@ SNS_TOP_ITEM = {"tid": "INTEGER", "username": "TEXT", "summary": "TEXT", "create
 SNS_MESSAGE = {"local_id": "INTEGER", "create_time": "INTEGER", "type": "INTEGER", "feed_id": "INTEGER", "is_unread": "INTEGER",
                "from_username": "TEXT", "from_nickname": "TEXT", "to_username": "TEXT", "content": "TEXT",
                "del_status": "INTEGER", "is_relative_me": "INTEGER"}
-SNS_PAGE = 25   # rows per read: 25 x MAX_CONTENT_BYTES stays well inside the reader's 8 MiB result limit
+SNS_PAGE = 25   # rows per read: 25 x MAX_CONTENT_BYTES (bytes, measured on the BLOB cast) stays inside the reader's 8 MiB result limit
+MAX_FEED_TIDS = 200000   # bound on the feed-summary bookkeeping held in memory
 KNOWN_CONTACT_COLUMNS = frozenset("id username local_type alias encrypt_username flag delete_flag verify_flag remark remark_quan_pin remark_pin_yin_initial nick_name pin_yin_initial quan_pin big_head_url small_head_url head_img_md5 chat_room_notify is_in_chat_room description extra_buffer chat_room_type".split())
 KNOWN_MESSAGE_COLUMNS = frozenset("local_id server_id local_type sort_seq real_sender_id create_time status upload_status download_status server_seq origin_source source message_content compress_content packed_info_data WCDB_CT_message_content WCDB_CT_source".split())
 KNOWN_SESSION_COLUMNS = frozenset("username type unread_count unread_first_msg_srv_id unread_first_pat_msg_local_id unread_first_pat_msg_sort_seq is_hidden summary draft status last_timestamp sort_timestamp last_clear_unread_timestamp last_msg_locald_id last_msg_type last_msg_sub_type last_msg_sender last_sender_display_name last_msg_ext_type".split())
@@ -218,13 +219,18 @@ class Wechat41Adapter:
         self._sns = (db, entry, schema, tables)
         self.sns_status = "available"
 
-    def _sns_rows(self, table_key, columns, *, page=SNS_PAGE):
-        """Keyset-paged rows of one sns table with an explicit column list (never *), one short transaction per page."""
+    def _sns_rows(self, table_key, columns, *, page=SNS_PAGE, checkpoint=None):
+        """Keyset-paged rows of one sns table with an explicit column list (never *), one short transaction per page.
+
+        `checkpoint` (cancellation) runs before every page.
+        """
         db, entry, schema, tables = self._sns
         quoted = schema.quote_table(tables[table_key])
         cursor = None
         with open_source(db, entry.raw_key, config=self.config, profile=entry.profile) as reader:
             while True:
+                if checkpoint:
+                    checkpoint()
                 with reader.transaction() as tx:
                     where = "WHERE rowid>?" if cursor is not None else ""
                     rows = tx.query(f"SELECT rowid AS bridge_rowid,{columns} FROM {quoted} {where} ORDER BY rowid LIMIT {int(page)}",
@@ -236,44 +242,55 @@ class Wechat41Adapter:
                     yield row
                 cursor = rows[-1]["bridge_rowid"]
 
-    def moments(self):
+    def moments(self, checkpoint=None):
         """Yield Moment records: full posts from SnsTimeLine, then feed-summary-only posts. Needs sns_status == available.
 
-        The feed table can hold several rows per post; its read flag is used only when all of them agree.
+        The feed table can hold several rows per post; its read flag is used only when all of them agree. Feed bookkeeping is
+        bounded (MAX_FEED_TIDS) and summaries are kept only for posts that have no body.
         """
-        flags, candidates = {}, {}
-        for row in self._sns_rows("top", "tid,username,substr(summary,1,2000) AS summary,create_time,is_read", page=100):
+        limit = moments_module.MAX_CONTENT_BYTES
+        with_body = set()
+        for row in self._sns_rows("timeline", "tid", page=100, checkpoint=checkpoint):
+            if type(row["tid"]) is int:
+                with_body.add(row["tid"])
+        flags, candidates, times = {}, {}, {}
+        for row in self._sns_rows("top", f"tid,username,substr(summary,1,{moments_module.MAX_SUMMARY + 1}) AS summary,create_time,is_read", page=100, checkpoint=checkpoint):
             tid = row["tid"]
             if type(tid) is not int:
                 continue
+            if tid not in flags and len(flags) >= MAX_FEED_TIDS:
+                raise BridgeError("moments_feed_limit")
             flags.setdefault(tid, set()).add(row["is_read"] if type(row["is_read"]) is int else None)
-            if tid not in candidates or (type(row["create_time"]) is int and row["create_time"] > (candidates[tid][2] or 0)):
+            if type(row["create_time"]) is int and row["create_time"] > times.get(tid, row["create_time"] - 1):
+                times[tid] = row["create_time"]
+            if tid not in with_body and (tid not in candidates or (type(row["create_time"]) is int and row["create_time"] > (candidates[tid][2] or 0))):
                 candidates[tid] = (row["username"], row["summary"], row["create_time"] if type(row["create_time"]) is int else None)
         def flag(tid):
             values = flags.get(tid, set())
             return next(iter(values)) if len(values) == 1 else None
         seen = set()
-        limit = moments_module.MAX_CONTENT_BYTES
-        for row in self._sns_rows("timeline", f"tid,user_name,CASE WHEN length(content)<={limit} THEN content END AS content"):
+        # length is measured in bytes on the BLOB cast: SQLite's length() on TEXT counts characters, and a multibyte page
+        # could otherwise exceed the reader's result limit and drop every Moment.
+        body = f"CASE WHEN length(CAST(content AS BLOB))<={limit} THEN content END"
+        for row in self._sns_rows("timeline", f"tid,user_name,{body} AS content", checkpoint=checkpoint):
             tid = row["tid"]
             if type(tid) is not int or tid in seen:
                 continue
             seen.add(tid)
-            fallback = candidates.get(tid, (None, None, None))[2]
             yield moments_module.parse_moment(tid, row["user_name"], row["content"] if isinstance(row["content"], str) else None,
-                                              self.identities, read_flag=flag(tid), fallback_time=fallback)
+                                              self.identities, read_flag=flag(tid), fallback_time=times.get(tid))
         for tid in sorted(candidates):
-            if tid not in seen:
-                username, summary, created = candidates[tid]
-                yield moments_module.summary_moment(tid, username, summary, created, self.identities, read_flag=flag(tid))
+            username, summary, created = candidates[tid]
+            yield moments_module.summary_moment(tid, username, summary, created, self.identities, read_flag=flag(tid))
 
-    def moment_notifications(self):
+    def moment_notifications(self, checkpoint=None):
         """Yield MomentNotification records from the sns message table. Needs sns_status == available."""
+        db, _, _, tables = self._sns
         columns = ("local_id,create_time,type,feed_id,is_unread,from_username,substr(from_nickname,1,256) AS from_nickname,"
-                   "to_username,substr(content,1,2000) AS content,del_status,is_relative_me")
-        for row in self._sns_rows("messages", columns):
+                   f"to_username,substr(content,1,{moments_module.MAX_COMMENT_TEXT + 1}) AS content,del_status,is_relative_me")
+        for row in self._sns_rows("messages", columns, checkpoint=checkpoint):
             if type(row["local_id"]) is int:
-                yield moments_module.notification(row, self.identities)
+                yield moments_module.notification(row, self.identities, db.database_id, tables["messages"])
 
     def _open(self, relative):
         if not hasattr(self, "config"):

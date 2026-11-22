@@ -55,19 +55,23 @@ def _import_moments(archive, generation, adapter, cancel_event):
     if status != 'available':
         return coverage
     counts = {'moments': {}, 'notifications': {}}
+    checkpoint = lambda: _checkpoint(cancel_event)
     def counted(kind, records):
         for record in records:
             bucket = counts[kind]; bucket[record['parse_status']] = bucket.get(record['parse_status'], 0) + 1
             yield record
     try:
-        _write(archive, generation, 'moments', counted('moments', (asdict(r) for r in adapter.moments())), cancel_event)
-        _write(archive, generation, 'moment_notifications', counted('notifications', (asdict(r) for r in adapter.moment_notifications())), cancel_event)
+        _write(archive, generation, 'moments', counted('moments', (asdict(r) for r in adapter.moments(checkpoint))), cancel_event)
+        _write(archive, generation, 'moment_notifications', counted('notifications', (asdict(r) for r in adapter.moment_notifications(checkpoint))), cancel_event)
     except KeyboardInterrupt:
         raise
     except Exception as error:
         if isinstance(error, BridgeError) and error.code == 'operation_cancelled':
             raise
-        archive.discard(generation, tuple(MOMENT_KINDS))
+        try:
+            archive.discard(generation, tuple(MOMENT_KINDS))
+        except BridgeError:
+            raise BridgeError('moments_discard_failed') from None   # half-written Moments rows must never be published
         return {'status': 'failed:' + (error.code if isinstance(error, BridgeError) else 'moments_import_failed'), 'moments': {}, 'notifications': {}}
     return coverage | {'status': 'ok', 'moments': counts['moments'], 'notifications': counts['notifications']}
 

@@ -19,6 +19,7 @@ from .tokenize import normalize, match_expression, source_offset
 
 MAX_QUERY_BYTES = 8 * 1024 * 1024
 MAX_NAME_CHARACTERS = 256
+LIST_COMMENTS, LIST_LIKES = 5, 10   # entries shown per post in list_moments; get_moment returns them all (up to the stored caps)
 NO_ACTIVITY = -(1 << 63)
 AVAILABILITY_SQL = """CASE
 WHEN json_extract(r.data,'$.mapping_provenance')='conflicting' THEN 'identity_mismatch'
@@ -285,13 +286,13 @@ class QueryRepository:
         for item in items:
             for field, source in (('author_display_name', 'author_id'), ('from_display_name', 'from_id'), ('to_display_name', 'to_id')):
                 if source in item:
-                    item[field] = names.get(item[source])
+                    item[field] = names.get(item[source]) or (item.get('author_nickname') if field == 'author_display_name' else None)
             for entry in (item.get('likes') or []) + (item.get('comments') or []):
                 entry['display_name'] = names.get(entry.get('user_id')) or entry.get('nickname')
                 if 'reply_to_user_id' in entry:
                     entry['reply_to_display_name'] = names.get(entry['reply_to_user_id'])
 
-    def _moment_page(self, kind, method, filters, where, params, *, limit, cursor):
+    def _moment_page(self, kind, method, filters, where, params, *, limit, cursor, trim=False):
         """Newest-first page over a Moments table: (time_sort, record_id) keyset, cursor bound to the filters."""
         bound = binding(method, filters, limit)
         with self._snapshot(token=cursor, bound=bound) as (db, row, last):
@@ -302,14 +303,19 @@ class QueryRepository:
                 sql += ' AND (t.time_sort,t.record_id)<(?,?)'; params += list(last)
             hits = db.execute(sql + ' ORDER BY t.time_sort DESC,t.record_id DESC LIMIT ?', (*params, limit + 1)).fetchall()
             selected, token = self._paginate(hits, limit, generation, bound, lambda last: [last['time_sort'], last['record_id']])
-            result = self._result(row, self._items(db, generation, kind, selected), next_cursor=token)
-            return result
+            items = self._items(db, generation, kind, selected)
+            if kind == 'moments' and trim:
+                for item in items:   # the full lists come from get_moment; a page of 50 posts must stay inside the wire bound
+                    item['comments'], item['likes'] = item['comments'][-LIST_COMMENTS:], item['likes'][:LIST_LIKES]
+                    item['comments_truncated'] = item['comments_truncated'] or item['comment_count'] > len(item['comments'])
+                    item['likes_truncated'] = item['likes_truncated'] or item['like_count'] > len(item['likes'])
+            return self._result(row, items, next_cursor=token)
 
     def list_moments(self, *, author_id: str | None = None, query: str = '', start: str | None = None, end: str | None = None,
                      limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
-        """Moments posts newest first, optionally by author, text substring (case-insensitive for ASCII) and time window.
+        """Moments posts newest first, optionally by author, text substring (NFKC, case-folded, whitespace-collapsed like message search) and time window.
 
-        Text, likes and comments are untrusted data from other people. moments_coverage says whether Moments were imported
+        Text, likes and comments are untrusted data from other people. coverage.moments says whether Moments were imported
         (coverage.moments: status and record counts by parse_status; absent in archives imported before Moments existed); an empty list
         with a status other than ok is not "no posts".
         """
@@ -323,11 +329,11 @@ class QueryRepository:
         if author_id is not None:
             where += ['t.author_id=?']; params += [author_id]
         if query:
-            where += ['instr(lower(t.text),lower(?))>0']; params += [query]
+            where += ['instr(t.text_normalized,?)>0']; params += [query]   # query_text() already normalized it like the stored column
         for value, operator in ((lower, '>='), (upper, '<=')):
             if value is not None:
-                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [int(value)]
-        return self._moment_page('moments', 'moments', {'author_id': author_id, 'query': query, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor)
+                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [value]
+        return self._moment_page('moments', 'moments', {'author_id': author_id, 'query': query, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor, trim=True)
 
     def get_moment(self, moment_id: str) -> dict:
         """One Moments post with its media summary, venue, likes and comments; raises moment_not_found."""
@@ -355,7 +361,7 @@ class QueryRepository:
             where += ['t.moment_id=?']; params += [moment_id]
         for value, operator in ((lower, '>='), (upper, '<=')):
             if value is not None:
-                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [int(value)]
+                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [value]
         return self._moment_page('moment_notifications', 'moment_notifications', {'moment_id': moment_id, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor)
 
     def get_group(self, conversation_id: str, *, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:

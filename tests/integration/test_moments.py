@@ -184,7 +184,7 @@ def test_a_failure_after_some_moments_discards_the_sns_part_and_still_publishes(
     cfg = import_case(tmp_path, extra_schemas={'sns/sns.db': SNS_SCHEMA})
     def broken(config):
         adapter = factory(config)
-        def notifications():
+        def notifications(checkpoint=None):
             raise BridgeError('query_timeout')
             yield
         adapter.moment_notifications = notifications
@@ -222,3 +222,87 @@ def test_an_existing_archive_without_moments_tables_gains_them_when_opened(tmp_p
     assert db.execute('PRAGMA user_version').fetchone()[0] == version
     assert repository(cfg).list_moments()['items'] == []   # pre-feature generation: queryable, empty, no Moments coverage entry
     assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+
+
+def test_multibyte_content_is_bounded_by_bytes_not_characters(tmp_path):
+    from wechat_bridge.adapters.moments import MAX_CONTENT_BYTES
+    heavy = post(2001, ALICE, '汉' * 100000)   # about 300 KB of UTF-8 in ~100k characters: under the character bound, over the byte bound
+    assert len(heavy) < MAX_CONTENT_BYTES < len(heavy.encode())
+    schema = SNS_SCHEMA + f"INSERT INTO SnsTimeLine VALUES(2001,'{ALICE}','{sql_text(heavy)}',NULL);" + ''.join(
+        f"INSERT INTO SnsTimeLine VALUES({2100 + i},'{BOB}','{sql_text(post(2100 + i, BOB, '汉' * 80000))}',NULL);" for i in range(30))
+    cfg, status = imported(tmp_path, schema)
+    assert status['coverage']['moments']['status'] == 'ok'   # many heavy rows never exceed the reader budget
+    assert status['coverage']['moments']['moments']['oversize'] == 2   # the original oversize row and the multibyte one
+
+
+def test_structure_time_truncation_nickname_and_unknown_delete_flags(tmp_path):
+    from wechat_bridge.adapters.identity import IdentityLookup
+    from wechat_bridge.adapters.moments import MAX_COMMENT_TEXT, MAX_TEXT, notification, parse_moment, summary_moment
+    identities = IdentityLookup('account', b'k' * 32)
+    assert parse_moment(1, ALICE, '<unrelated/>', identities).parse_status == 'malformed'
+    assert parse_moment(1, ALICE, '<SnsDataItem><LocalExtraInfo/></SnsDataItem>', identities).diagnostic_codes == ('moment_unexpected_structure',)
+    undated = post(2, ALICE, 'no time').replace('<createTime>1700000000</createTime>', '')
+    assert parse_moment(2, ALICE, undated, identities).parse_status == 'partial'
+    assert parse_moment(2, ALICE, undated, identities, fallback_time=1700000000).diagnostic_codes == ('moment_time_from_feed',)
+    long = parse_moment(3, ALICE, post(3, ALICE, 'y' * (MAX_TEXT + 5), comments=comment(BOB, 'b', 'z' * (MAX_COMMENT_TEXT + 5), 1700000001)), identities)
+    assert long.text_truncated and len(long.text) == MAX_TEXT and long.comments[0]['text_truncated'] and not parse_moment(4, ALICE, post(4, ALICE, 'short'), identities).text_truncated
+    assert summary_moment(5, BOB, 's' * 2500, 1700000000, identities).text_truncated
+    odd = parse_moment(6, ALICE, post(6, ALICE, 'x', comments=comment(BOB, 'b', 'secret words', 1700000001, deleted=2)), identities)
+    assert odd.comments[0]['deleted'] is None and odd.comments[0]['text'] is None
+    nick = parse_moment(7, 'someone-not-a-contact', post(7, 'someone-not-a-contact', 'x').replace('<like_flag>0</like_flag>', '<nickname>Stranger Nick</nickname>'), identities)
+    assert nick.author_nickname == 'Stranger Nick'
+    row = {'local_id': 1, 'create_time': 1700000000, 'type': 2, 'feed_id': 7, 'content': 'hi', 'del_status': 2, 'is_relative_me': 1, 'is_unread': 0, 'from_username': BOB}
+    flagged = notification(row, identities, 'db1', 'SnsMessage_tmp3')
+    assert flagged.deleted is None and flagged.text is None and 'notification_unknown_delete_flag' in flagged.diagnostic_codes
+    assert flagged.notification_id != notification(row, identities, 'db2', 'SnsMessage_tmp3').notification_id != notification(row, identities, 'db1', 'SnsMessage_tmp9').notification_id
+
+
+def test_author_nickname_is_the_fallback_name_and_names_do_not_use_a_contact_when_missing(tmp_path):
+    stranger = post(3001, 'unknown-person', 'from a stranger').replace('<like_flag>0</like_flag>', '<nickname>Stranger Nick</nickname>')
+    cfg, _ = imported(tmp_path, SNS_SCHEMA + f"INSERT INTO SnsTimeLine VALUES(3001,'unknown-person','{sql_text(stranger)}',NULL);")
+    item = repository(cfg).list_moments(query='from a stranger')['items'][0]
+    assert item['author_display_name'] == 'Stranger Nick'
+
+
+def test_search_matches_normalized_text_and_time_bounds_are_exact(tmp_path):
+    full = post(4001, ALICE, 'Straße  ＡＢＣ\nx', created=1700001000)
+    cfg, _ = imported(tmp_path, SNS_SCHEMA + f"INSERT INTO SnsTimeLine VALUES(4001,'{ALICE}','{sql_text(full)}',NULL);")
+    repo = repository(cfg)
+    assert [m['moment_id'] for m in repo.list_moments(query='Straße abc x')['items']]   # same normalization as message search
+    assert repo.list_moments(start='2023-11-14T22:30:00.5+00:00')['items'] == []   # the record at :40.000 is before :40.5
+    assert [m['utc_timestamp'][:19] for m in repo.list_moments(start='2023-11-14T22:30:00+00:00')['items']] == ['2023-11-14T22:30:00']
+    assert repo.list_moments(end='2023-11-14T22:29:59.9+00:00', query='abc')['items'] == []
+
+
+def test_list_moments_trims_embedded_lists_but_get_moment_returns_them_all(tmp_path):
+    many = post(5001, ALICE, 'busy', comments=''.join(comment(BOB, 'b', f'c{i}', 1700000000 + i) for i in range(12)),
+                likes=''.join(like(BOB, 'b', 1700000000 + i) for i in range(20)), created=1700002000)
+    cfg, _ = imported(tmp_path, SNS_SCHEMA + f"INSERT INTO SnsTimeLine VALUES(5001,'{ALICE}','{sql_text(many)}',NULL);")
+    repo = repository(cfg)
+    listed = repo.list_moments(query='busy')['items'][0]
+    assert len(listed['comments']) == 5 and listed['comments'][-1]['text'] == 'c11' and listed['comments_truncated'] and listed['comment_count'] == 12
+    assert len(listed['likes']) == 10 and listed['likes_truncated'] and listed['like_count'] == 20
+    full = repo.get_moment(listed['moment_id'])['moment']
+    assert len(full['comments']) == 12 and len(full['likes']) == 20 and not full['comments_truncated']
+
+
+def test_cancellation_is_checked_while_the_feed_is_scanned_and_a_failed_discard_is_not_published(tmp_path, monkeypatch):
+    import threading
+    from wechat_bridge.archive.importer import refresh_archive
+    from wechat_bridge.archive.store import Archive
+    cfg = import_case(tmp_path, extra_schemas={'sns/sns.db': SNS_SCHEMA})
+    cancel = threading.Event(); cancel.set()
+    status = refresh_archive(cfg, adapter_factory=factory, cancel_event=cancel)
+    assert status['status'] == 'failed' and status['error'] == 'operation_cancelled'
+    def broken(config):
+        adapter = factory(config)
+        def notifications(checkpoint=None):
+            raise BridgeError('query_timeout')
+            yield
+        adapter.moment_notifications = notifications
+        return adapter
+    def failing(self, generation, kinds):
+        raise BridgeError('archive_write_failed')
+    monkeypatch.setattr(Archive, 'discard', failing)
+    status = refresh_archive(cfg, adapter_factory=broken)
+    assert status['status'] == 'failed' and status['error'] == 'moments_discard_failed'

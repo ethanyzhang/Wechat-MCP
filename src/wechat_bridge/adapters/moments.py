@@ -12,6 +12,7 @@ from .messages import parse_xml
 
 MAX_CONTENT_BYTES = 262144        # larger rows are never read (SQL side), only reported as oversize
 MAX_TEXT = 20000
+MAX_SUMMARY = 2000
 MAX_COMMENT_TEXT = 2000
 MAX_NAME = 128
 MAX_COMMENTS = 100
@@ -29,6 +30,8 @@ class Moment:
     utc_timestamp: str | None
     time_sort: int
     text: str | None
+    text_truncated: bool = False
+    author_nickname: str | None = None
     content_type: int | None = None
     link_title: str | None = None
     media: list = field(default_factory=list)
@@ -59,6 +62,7 @@ class MomentNotification:
     from_nickname: str | None
     to_id: str | None
     text: str | None
+    text_truncated: bool
     involves_me: bool | None
     deleted: bool | None
     source_unread_flag: int | None
@@ -73,12 +77,22 @@ def iso(seconds):
     return (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=seconds)).isoformat(), seconds
 
 
-def _text(element, tag, limit=MAX_TEXT):
+def _text_cut(element, tag, limit=MAX_TEXT):
+    """Stripped text of a child, cut to `limit`, and whether it was cut."""
     child = element.find(tag) if element is not None else None
     value = child.text.strip() if child is not None and isinstance(child.text, str) else ""
-    if "\0" in value:
-        return None
-    return value[:limit] if value else None
+    if "\0" in value or not value:
+        return None, False
+    return value[:limit], len(value) > limit
+
+
+def _text(element, tag, limit=MAX_TEXT):
+    return _text_cut(element, tag, limit)[0]
+
+
+def _flag(value):
+    """The source deletion flag: 0 live, 1 deleted, anything else (or missing) unknown. Only a known live entry keeps its text."""
+    return {0: False, 1: True}.get(value) if type(value) is int else None
 
 
 def _int(element, tag):
@@ -98,14 +112,13 @@ def _people(parent, identities, limit, *, with_text):
     for item in (parent.findall("user_comment") if parent is not None else []):
         username = _text(item, "username", 256)
         created, sort = iso(_int(item, "create_time"))
-        deleted = _int(item, "b_deleted")
+        deleted = _flag(_int(item, "b_deleted"))
         entry = {"user_id": identities.contact_id(username) if username else None,
-                 "nickname": _text(item, "nickname", MAX_NAME), "utc_timestamp": created,
-                 "deleted": None if deleted is None else deleted != 0}
+                 "nickname": _text(item, "nickname", MAX_NAME), "utc_timestamp": created, "deleted": deleted}
         if with_text:
             reply = _text(item, "ref_username", 256)
             entry["reply_to_user_id"] = identities.contact_id(reply) if reply else None
-            entry["text"] = None if deleted != 0 else _text(item, "content", MAX_COMMENT_TEXT)
+            entry["text"], entry["text_truncated"] = _text_cut(item, "content", MAX_COMMENT_TEXT) if deleted is False else (None, False)
         entries.append((sort, entry))
     total = len(entries)
     entries.sort(key=lambda pair: pair[0])
@@ -121,6 +134,8 @@ def parse_moment(tid, username, content, identities, *, read_flag=None, fallback
     moment_id = identities.moment_id(tid)
     author = identities.contact_id(username) if isinstance(username, str) and username and "\0" not in username else None
     fallback = iso(fallback_time)
+    if content is not None and len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
+        content = None
     if content is None:
         return Moment(moment_id, author, fallback[0], fallback[1], None, source_read_flag=read_flag,
                       parse_status="oversize", diagnostic_codes=("moment_content_oversize",))
@@ -131,11 +146,16 @@ def parse_moment(tid, username, content, identities, *, read_flag=None, fallback
                       parse_status="malformed", diagnostic_codes=("moment_" + getattr(error, "code", "malformed_xml"),))
     post = root.find("TimelineObject")
     extra = root.find("LocalExtraInfo")
+    if root.tag != "SnsDataItem" or post is None:
+        return Moment(moment_id, author, fallback[0], fallback[1], None, source_read_flag=read_flag,
+                      parse_status="malformed", diagnostic_codes=("moment_unexpected_structure",))
     stamp, sort = iso(_int(post, "createTime"))
     codes = []
+    status = "ok"
     if stamp is None:
         stamp, sort = fallback
-        codes.append("moment_time_from_feed")
+        codes.append("moment_time_from_feed" if stamp else "moment_time_missing")
+        status = "ok" if stamp else "partial"
     media = []
     objects = post.find("ContentObject") if post is not None else None
     media_nodes = objects.findall("mediaList/media") if objects is not None else []
@@ -157,37 +177,43 @@ def parse_moment(tid, username, content, identities, *, read_flag=None, fallback
     likes, like_count, likes_cut = _people(extra.find("like_user_list") if extra is not None else None, identities, MAX_LIKES, with_text=False)
     comments, comment_count, comments_cut = _people(extra.find("comment_user_list") if extra is not None else None, identities, MAX_COMMENTS, with_text=True)
     private = _int(post, "private")
-    return Moment(moment_id, author, stamp, sort, _text(post, "contentDesc"), _int(objects, "type"),
+    text, cut = _text_cut(post, "contentDesc")
+    nick = _text(extra, "nickname", MAX_NAME)
+    return Moment(moment_id, author, stamp, sort, text, cut, nick, _int(objects, "type"),
                   _text(objects, "title", 512), media, len(media_nodes), location,
                   None if private is None else private != 0, likes, like_count, likes_cut, comments, comment_count, comments_cut,
-                  read_flag, "ok", tuple(codes))
+                  read_flag, status, tuple(codes))
 
 
 def summary_moment(tid, username, summary, created, identities, *, read_flag=None):
     """A post that has only a feed summary row (no body in SnsTimeLine): author, time and the summary text."""
     stamp, sort = iso(created)
     author = identities.contact_id(username) if isinstance(username, str) and username and "\0" not in username else None
-    text = summary.strip()[:MAX_TEXT] if isinstance(summary, str) and "\0" not in summary and summary.strip() else None
-    return Moment(identities.moment_id(tid), author, stamp, sort, text, source_read_flag=read_flag,
+    value = summary.strip() if isinstance(summary, str) and "\0" not in summary else ""
+    text = value[:MAX_SUMMARY] if value else None
+    return Moment(identities.moment_id(tid), author, stamp, sort, text, len(value) > MAX_SUMMARY, source_read_flag=read_flag,
                   parse_status="summary_only", diagnostic_codes=("moment_body_missing",))
 
 
-def notification(row, identities):
+def notification(row, identities, database_id, table):
     """Build a MomentNotification from one SnsMessage_tmp3 row (explicit columns only); never raises for bad values."""
     stamp, sort = iso(row.get("create_time"))
     code = row.get("type") if type(row.get("type")) is int else None
-    text = row.get("content") if isinstance(row.get("content"), str) and "\0" not in row["content"] and row["content"].strip() else None
-    deleted = row.get("del_status") if type(row.get("del_status")) is int else None
+    raw = row.get("content").strip() if isinstance(row.get("content"), str) and "\0" not in row["content"] else ""
+    text, cut = (raw[:MAX_COMMENT_TEXT] if raw else None), len(raw) > MAX_COMMENT_TEXT
+    deleted = _flag(row.get("del_status"))
+    codes = [] if stamp else ["notification_invalid_time"]
+    if deleted is None:
+        codes.append("notification_unknown_delete_flag")
     def person(name):
         return identities.contact_id(name) if isinstance(name, str) and name and "\0" not in name else None
     feed = row.get("feed_id") if type(row.get("feed_id")) is int else None
     nickname = row.get("from_nickname")
     return MomentNotification(
-        identities.notification_id(row["local_id"]), identities.moment_id(feed) if feed is not None else None, stamp, sort, code,
+        identities.notification_id(database_id, table, row["local_id"]), identities.moment_id(feed) if feed is not None else None, stamp, sort, code,
         {1: "like", 2: "comment"}.get(code, "unknown") if code != 2 or text else "unknown",
         person(row.get("from_username")), nickname[:MAX_NAME] if isinstance(nickname, str) and "\0" not in nickname else None,
-        person(row.get("to_username")), text[:MAX_COMMENT_TEXT] if text and deleted == 0 else None,
+        person(row.get("to_username")), text if deleted is False else None, cut and deleted is False,
         None if type(row.get("is_relative_me")) is not int else row["is_relative_me"] != 0,
-        None if deleted is None else deleted != 0,
-        row.get("is_unread") if type(row.get("is_unread")) is int else None,
-        "ok" if stamp else "partial", () if stamp else ("notification_invalid_time",))
+        deleted, row.get("is_unread") if type(row.get("is_unread")) is int else None,
+        "ok" if stamp else "partial", tuple(codes))
