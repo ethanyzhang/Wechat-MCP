@@ -10,6 +10,13 @@ class UiError(Exception):
         self.code = code
 
 
+class PressUncertain(Exception):
+    """The Send press may or may not have happened (crash, timeout or unreadable output after dispatch)."""
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class WindowState:
     """What is visible in the WeChat window right now. Text fields are None when the element is not reachable."""
@@ -27,4 +34,7 @@ class UiDriver(Protocol):
     def open_chat(self, name: str) -> None: ...
     def state(self) -> WindowState: ...
     def set_composer(self, text: str) -> None: ...
-    def click_send(self) -> None: ...
+    def click_send(self, name: str, kind: str, text: str) -> None:
+        """Re-verify title, kind and composer text in the same step, then press Send once. UiError means nothing was pressed;
+        any other exception means the press may have happened."""
+        ...

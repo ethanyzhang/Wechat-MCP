@@ -38,26 +38,46 @@ let ax = AXUIElementCreateApplication(app.processIdentifier)
 func window() -> AXUIElement? { (attr(ax, kAXWindowsAttribute) as? [AXUIElement])?.first }
 func isFront() -> Bool { NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier }
 func run(_ path: String, _ args: [String]) { let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args; try? p.run(); p.waitUntilExit() }
-func moveMouse(_ p: CGPoint) { CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap) }
+let systemWide = AXUIElementCreateSystemWide()
+/// Every mouse event is preceded by this check: WeChat frontmost and the element under the point belongs to WeChat.
+func guardPoint(_ p: CGPoint) {
+    guard isFront() else { fail("wechat_not_frontmost") }
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(systemWide, Float(p.x), Float(p.y), &hit) == .success, let h = hit else { fail("target_obscured") }
+    var pid: pid_t = 0
+    AXUIElementGetPid(h, &pid)
+    guard pid == app.processIdentifier else { fail("target_obscured") }
+}
+func moveMouse(_ p: CGPoint) { guardPoint(p); CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap) }
 func mouseClick(_ p: CGPoint) {   // exactly one down/up pair
     moveMouse(p); usleep(60_000)
+    guardPoint(p)   // re-check right before the press: focus can change during the pause
     for t in [CGEventType.leftMouseDown, .leftMouseUp] {
         CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap); usleep(60_000)
     }
 }
 func str(_ e: AXUIElement?, _ a: String = kAXValueAttribute) -> String? { e.flatMap { attr($0, a) as? String } }
 
+/// The Send control: exactly one AXButton titled 发送 right of the composer centre and just below its top edge.
+/// Zero or several candidates mean the layout changed: no match.
+func sendButton(_ w: AXUIElement, _ cf: CGRect) -> AXUIElement? {
+    var found: [AXUIElement] = []
+    visited = 0
+    func walk(_ e: AXUIElement, _ depth: Int) {
+        if depth > 16 || visited > 6000 { return }
+        visited += 1
+        if (attr(e, kAXRoleAttribute) as? String) == "AXButton", (str(e, kAXTitleAttribute) ?? "") == "发送", let f = frameOf(e),
+           f.minX > cf.midX, f.minY >= cf.maxY - 20, f.minY < cf.maxY + 120, f.maxX <= cf.maxX + 40 { found.append(e) }
+        for k in children(e) { walk(k, depth + 1) }
+    }
+    walk(w, 0)
+    return found.count == 1 ? found[0] : nil
+}
+
 func chatState(_ w: AXUIElement) -> [String: Any]? {
     guard let label = findFresh(w, { ident($0) == "current_chat_name_label" }) else { return nil }
     let composer = findFresh(w) { ident($0) == "chat_input_field" }
-    var send: AXUIElement? = nil
-    if let cf = composer.flatMap(frameOf) {
-        // Send is the 2-character-titled button right of the composer centre and below its top.
-        send = findFresh(w) { e in
-            guard (attr(e, kAXRoleAttribute) as? String) == "AXButton", (str(e, kAXTitleAttribute) ?? "").count == 2, let f = frameOf(e) else { return false }
-            return f.minX > cf.midX && f.minY >= cf.maxY - 20 && f.minY < cf.maxY + 120 && f.maxX <= cf.maxX + 40
-        }
-    }
+    let send = composer.flatMap(frameOf).flatMap { sendButton(w, $0) }
     var bubbles: [String] = []
     if let list = findFresh(w, { ident($0) == "chat_message_list" }) {
         bubbles = children(list).filter { ident($0) == "chat_bubble_item_view" }.compactMap { str($0, kAXTitleAttribute) }
@@ -81,24 +101,26 @@ case "state":
 case "open":
     guard CommandLine.arguments.count == 3, let w = window() else { fail("usage") }
     let name = CommandLine.arguments[2]
-    guard isFront() else { fail("wechat_not_frontmost") }
-    // Any starting tab: click the left-bar tab buttons (real clicks) until the chat pane is there.
-    if chatState(w) == nil {
+    func list() -> AXUIElement? { findFresh(w) { ident($0) == "session_list" } }
+    func row() -> AXUIElement? { findFresh(w) { ident($0) == "session_item_" + name } }
+    // Any starting tab: when the chat list is not showing, click the left-bar tab buttons (real clicks, relative to the
+    // window's own frame) until it appears. A chat list with no chat selected counts as showing.
+    if list() == nil, let wf = frameOf(w) {
         let bar = (children(w).first).map { children($0).filter { (attr($0, kAXRoleAttribute) as? String) == "AXButton" && ident($0).isEmpty } } ?? []
-        let tabs = bar.compactMap { b in frameOf(b).map { (b, $0) } }.filter { $0.1.minX < 80 }.sorted { $0.1.minY < $1.1.minY }
+        let tabs = bar.compactMap { b in frameOf(b).map { (b, $0) } }.filter { $0.1.minX - wf.minX < 80 && $0.1.minX >= wf.minX }.sorted { $0.1.minY < $1.1.minY }
         for (_, f) in tabs {
             mouseClick(CGPoint(x: f.midX, y: f.midY))
             usleep(UInt32((NSEvent.doubleClickInterval + 0.25) * 1_000_000))   // never two clicks inside the double-click interval
-            if chatState(w) != nil { break }
+            if list() != nil { break }
         }
     }
-    guard let s0 = chatState(w) else { fail("chat_pane_unavailable") }
-    if (s0["title"] as? String) == name { out(["ok": true]) }
-    func list() -> AXUIElement? { findFresh(w) { ident($0) == "session_list" } }
-    func row() -> AXUIElement? { findFresh(w) { ident($0) == "session_item_" + name } }
+    guard list() != nil else { fail("chat_pane_unavailable") }
+    if let s0 = chatState(w), (s0["title"] as? String) == name { out(["ok": true]) }
     func scroll(_ lines: Int32) {
         guard let l = list(), let f = frameOf(l) else { return }
-        moveMouse(CGPoint(x: f.midX, y: f.midY)); usleep(40_000)
+        let p = CGPoint(x: f.midX, y: f.midY)
+        moveMouse(p); usleep(40_000)
+        guardPoint(p)
         CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: lines, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap); usleep(120_000)
     }
     for _ in 0..<12 { scroll(30) }
@@ -116,13 +138,16 @@ case "set_composer":
     let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
     AXUIElementSetAttributeValue(c, kAXValueAttribute as CFString, text as CFString) == .success ? out(["ok": true]) : fail("ui_unavailable")
 case "click_send":
-    guard isFront() else { fail("wechat_not_frontmost") }   // a click while another app is in front would land on it
-    guard let w = window(), let s = chatState(w), (s["send_enabled"] as? Bool) == true else { fail("ui_unavailable") }
+    // click_send <name> <direct|group>, text on stdin. Everything is re-verified in this same run, right before the click,
+    // so a chat switch or a draft edit since the last read cannot send the wrong thing. Any `fail` here happens before the
+    // click; once the click is made the only reply is ok.
+    guard CommandLine.arguments.count == 4, let w = window() else { fail("usage") }
+    let name = CommandLine.arguments[2], group = CommandLine.arguments[3] == "group"
+    let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard let s = chatState(w), (s["title"] as? String) == name, (s["count_label"] is String) == group,
+          (s["composer_text"] as? String) == text, (s["send_enabled"] as? Bool) == true else { fail("state_changed") }
     guard let composer = findFresh(w, { ident($0) == "chat_input_field" }), let cf = frameOf(composer),
-          let b = findFresh(w, { e in
-              guard (attr(e, kAXRoleAttribute) as? String) == "AXButton", (str(e, kAXTitleAttribute) ?? "").count == 2, let f = frameOf(e) else { return false }
-              return f.minX > cf.midX && f.minY >= cf.maxY - 20 && f.minY < cf.maxY + 120 && f.maxX <= cf.maxX + 40
-          }), let bf = frameOf(b) else { fail("ui_unavailable") }
+          let b = sendButton(w, cf), let bf = frameOf(b) else { fail("send_control_not_found") }
     mouseClick(CGPoint(x: bf.midX, y: bf.midY)); out(["ok": true])
 default: fail("usage")
 }

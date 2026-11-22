@@ -61,6 +61,15 @@ class Sender:
             driver.open_chat(name)
         except UiError as error:
             raise BridgeError('refused_' + error.code) from None
+        try:
+            return self._after_open(conversation_id, name, kind, text)
+        except BridgeError as error:
+            if error.code.startswith('refused_'):
+                self.log.refused(conversation_id)   # opening the chat already touched WeChat (it marks the chat read)
+            raise
+
+    def _after_open(self, conversation_id, name, kind, text):
+        driver = self.driver
         state = self._state()
         if not title_matches(state, name, kind):
             raise BridgeError('refused_wrong_chat')
@@ -71,35 +80,51 @@ class Sender:
         baseline = state.bubbles
         try:
             driver.set_composer(text)
+            state = self._state()
+            if not title_matches(state, name, kind) or state.composer_text != text or state.send_enabled is not True:
+                raise BridgeError('refused_composer_mismatch')
+            self.log.attempt(conversation_id, text)   # Durable before the press; raises send_log_unavailable (nothing sent).
         except UiError as error:
+            self._clear_if_ours(name, kind, text)
             raise BridgeError('refused_' + error.code) from None
-        state = self._state()
-        if not title_matches(state, name, kind) or state.composer_text != text or state.send_enabled is not True:
-            self._clear()
-            raise BridgeError('refused_composer_mismatch')
-        self.log.attempt(conversation_id, text)   # Durable before the press; raises send_log_unavailable (nothing sent).
+        except BridgeError:
+            self._clear_if_ours(name, kind, text)
+            raise
         try:
-            driver.click_send()
-            outcome = self._confirm(text, baseline)
+            driver.click_send(name, kind, text)
+        except UiError as error:
+            # The helper refused before pressing: nothing was sent. Take our text back out and say so.
+            self._clear_if_ours(name, kind, text)
+            self.log.result(conversation_id, text, 'refused_' + error.code)
+            raise BridgeError('refused_' + error.code) from None
         except Exception:
-            outcome = 'unconfirmed'      # Anything after the press: the message may be out, so never claim otherwise.
+            outcome = 'unconfirmed'      # The press may have happened: never claim otherwise, never retry.
+        else:
+            try:
+                outcome = self._confirm(name, kind, text, baseline)
+            except Exception:
+                outcome = 'unconfirmed'
         self.log.result(conversation_id, text, outcome)
         if outcome == 'sent':
             return {'state': 'sent', 'evidence': 'window_shows_message'}
         return {'state': 'unconfirmed', 'note': 'The message may or may not have been sent; do not resend. Check the chat.'}
 
-    def _clear(self):
+    def _clear_if_ours(self, name, kind, text):
+        """Empty the composer only while it still holds our text in the chat we wrote it to; never touch anyone else's draft."""
         try:
-            self.driver.set_composer('')
-        except UiError:
+            state = self.driver.state()
+            if title_matches(state, name, kind) and state.composer_text == text:
+                self.driver.set_composer('')
+        except Exception:
             pass
 
-    def _confirm(self, text, baseline) -> str:
-        """sent only when the composer emptied and a bubble holding the text is new against the pre-send baseline."""
+    def _confirm(self, name, kind, text, baseline) -> str:
+        """sent only when, in the same chat, the composer emptied and the count of bubbles exactly equal to the text grew."""
         end = self.clock() + CONFIRM_SECONDS
+        before = sum(b == text for b in baseline)
         while True:
             state = self.driver.state()
-            if state.composer_text == '' and sum(text in b for b in state.bubbles) > sum(text in b for b in baseline):
+            if title_matches(state, name, kind) and state.composer_text == '' and sum(b == text for b in state.bubbles) > before:
                 return 'sent'
             if self.clock() >= end:
                 return 'unconfirmed'

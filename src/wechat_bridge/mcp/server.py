@@ -80,7 +80,7 @@ def _attachment(service, attachment_id, representation, max_bytes, generation):
 
 
 def create_server(config, *, watch=True, enable_send=False, send_driver=None):
-    """Build the MCP server with ten read-only tools and one attachment resource.
+    """Build the MCP server with ten read-only tools and one attachment resource (plus send_message when enable_send).
 
     Unknown tool arguments are rejected with invalid_arguments. With watch=True one
     background watcher per state directory refreshes the archive.

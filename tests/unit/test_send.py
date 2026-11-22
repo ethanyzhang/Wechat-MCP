@@ -6,7 +6,7 @@ import stat
 import pytest
 
 from wechat_bridge.core.errors import BridgeError
-from wechat_bridge.send.driver import UiError, WindowState
+from wechat_bridge.send.driver import PressUncertain, UiError, WindowState
 from wechat_bridge.send.log import MAX_PER_HOUR, SendLog, digest
 from wechat_bridge.send.sender import Sender
 
@@ -19,7 +19,7 @@ class Fake:
     def __init__(self, title='Alice', count=None, composer='', echo=True, trusted=True, open_title=None):
         self.title, self.count, self.composer, self.echo, self._trusted = title, count, composer, echo, trusted
         self.bubbles = ['older']; self.calls = []; self.send_enabled = True
-        self.fail_after_click = False; self.open_title = open_title; self.set_ignored = False
+        self.fail_after_click = False; self.open_title = open_title; self.set_ignored = False; self.press_error = None; self.on_set = None
 
     def trusted(self): return self._trusted
     def activate(self): self.calls.append('activate')
@@ -31,12 +31,15 @@ class Fake:
         self.calls.append('set:' + text)
         if not self.set_ignored:
             self.composer = text
-    def click_send(self):
+        if self.on_set: self.on_set(self)
+    def click_send(self, name, kind, text):
         self.calls.append('click')
+        if self.press_error:
+            raise self.press_error
         if self.echo:
             self.bubbles.append(self.composer); self.composer = ''
         if self.fail_after_click:
-            raise UiError('ui_unavailable')
+            raise PressUncertain('ui_unavailable')
 
 
 def build(tmp_path, driver=None, *, name='Alice', kind='direct', count=1, clock=None):
@@ -59,7 +62,7 @@ def test_sent_direct_and_group_chat_in_order(tmp_path):
     sender, driver, log, _ = build(tmp_path)
     assert sender.send(CONV, 'Alice', 'hello\nworld') == {'state': 'sent', 'evidence': 'window_shows_message'}
     assert driver.calls == ['activate', 'open', 'set:hello\nworld', 'click']
-    sender, driver, *_ = build(tmp_path / 'g' if (tmp_path / 'g').mkdir() is None else tmp_path, kind='group', name='Team')
+    sender, driver, *_ = build(tmp_path / 'g', kind='group', name='Team')
     assert sender.send(CONV, 'Team', 'hi')['state'] == 'sent'
 
 
@@ -109,7 +112,7 @@ def test_composer_that_does_not_take_the_text_is_cleared_and_refused(tmp_path):
     driver = Fake(); driver.set_ignored = True
     sender, driver, *_ = build(tmp_path, driver)
     assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_composer_mismatch'
-    assert 'click' not in driver.calls and driver.calls[-1] == 'set:'
+    assert 'click' not in driver.calls and driver.composer == ''   # nothing was written, nothing to take back
 
 
 def test_ui_error_while_opening_is_a_refusal(tmp_path):
@@ -184,3 +187,100 @@ def test_unresolved_attempt_still_counts_for_the_throttle(tmp_path):
     log.attempt(CONV, 'x')   # attempt without a result, as after a crash
     now[0] += 1
     assert code(lambda: sender.send(CONV, 'Alice', 'y')) == 'throttled'
+
+
+def test_click_that_the_helper_refuses_clears_our_text_and_is_a_refusal_not_unconfirmed(tmp_path):
+    driver = Fake(); driver.press_error = UiError('state_changed')
+    sender, driver, log, now = build(tmp_path, driver)
+    assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_state_changed'
+    assert driver.composer == ''
+    events = [json.loads(line) for line in log.path.read_text().splitlines()]
+    assert [e['state'] for e in events if e['event'] == 'result'] == ['refused_state_changed']
+    now[0] += 5   # a refused press leaves no duplicate block and no hourly count: the same text can go again
+    driver.press_error = None
+    assert sender.send(CONV, 'Alice', 'hi')['state'] == 'sent'
+
+
+def test_refusal_never_clears_a_draft_in_another_chat(tmp_path):
+    driver = Fake()
+    def switch(d):   # the user switches chats right after our text was written
+        d.title, d.composer = 'Bob', 'bob draft'
+    driver.on_set = switch
+    sender, driver, *_ = build(tmp_path, driver)
+    assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_composer_mismatch'
+    assert driver.composer == 'bob draft' and driver.calls[-1] == 'set:hi'
+
+
+def test_state_error_after_the_write_clears_the_composer(tmp_path):
+    driver = Fake()
+    def break_state(d):
+        def boom(): raise UiError('ui_unavailable')
+        calls = iter([None])
+        d.state = lambda: (_ for _ in ()).throw(UiError('ui_unavailable'))
+    driver.on_set = break_state
+    sender, *_ = build(tmp_path, driver)
+    assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_ui_unavailable'
+
+
+def test_set_composer_failure_is_a_refusal(tmp_path):
+    driver = Fake()
+    def boom(text): raise UiError('ui_unavailable')
+    driver.set_composer = boom
+    sender, *_ = build(tmp_path, driver)
+    assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_ui_unavailable'
+
+
+def test_substring_bubbles_and_other_chats_do_not_confirm(tmp_path):
+    driver = Fake(echo=False)
+    def echo_substring(d): pass
+    orig = driver.click_send
+    def click(name, kind, text):
+        orig(name, kind, text); driver.bubbles.append('this is it'); driver.composer = ''
+    driver.click_send = click
+    sender, *_ = build(tmp_path, driver)
+    assert sender.send(CONV, 'Alice', 'hi')['state'] == 'unconfirmed'
+    driver2 = Fake(echo=False)
+    def other(name, kind, text):
+        driver2.title = 'Bob'; driver2.bubbles.append(text); driver2.composer = ''
+    driver2.click_send = other
+    sender, *_ = build(tmp_path / 'x', driver2)
+    assert sender.send(CONV, 'Alice', 'hi')['state'] == 'unconfirmed'
+
+
+def test_refused_after_opening_counts_toward_the_interval(tmp_path):
+    sender, driver, log, now = build(tmp_path, Fake(composer='draft'))
+    assert code(lambda: sender.send(CONV, 'Alice', 'a')) == 'refused_draft_present'
+    now[0] += 1
+    assert code(lambda: sender.send(CONV, 'Alice', 'b')) == 'throttled'
+
+
+def test_log_short_write_is_completed_and_damaged_history_refuses(tmp_path, monkeypatch):
+    import os as os_module
+    sender, driver, log, now = build(tmp_path)
+    real = os_module.write
+    monkeypatch.setattr('wechat_bridge.send.log.os.write', lambda fd, data: real(fd, bytes(data)[:5]))
+    log.attempt(CONV, 'x')
+    monkeypatch.undo()
+    assert json.loads(log.path.read_text().splitlines()[0])['event'] == 'attempt'
+    with log.path.open('a') as stream:
+        stream.write('{broken')
+    now[0] += 10
+    assert code(lambda: log.check_allowed(CONV, 'y')) == 'send_log_unavailable'
+
+
+def test_two_registrations_share_one_log_and_the_limit(tmp_path):
+    first = SendLog(tmp_path, b'a' * 32, clock=lambda: 1000.0)
+    second = SendLog(tmp_path, b'b' * 32, clock=lambda: 1000.0 + 10)
+    for index in range(MAX_PER_HOUR):
+        first.attempt(CONV, f't{index}')
+    assert code(lambda: second.check_allowed(CONV, 'new')) == 'throttled'
+
+
+def test_send_lock_times_out_when_another_send_holds_it(tmp_path):
+    from wechat_bridge.send.log import send_lock
+    ticks = iter(range(10 ** 4))
+    with send_lock(tmp_path):
+        def contend():
+            with send_lock(tmp_path, wait=1, sleep=lambda s: None, clock=lambda: next(ticks)):
+                pass
+        assert code(contend) == 'refused_busy'

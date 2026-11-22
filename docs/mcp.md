@@ -130,22 +130,29 @@ tool keeps its read-only annotation.
   and that denying it changes nothing in WeChat.
 - **What it does.** Text only (up to 2000 characters, newline allowed, no other control character), to a direct or
   group chat. `recipient_name` must equal the conversation's full stored display name, the name must be unique among
-  all contacts and conversations, and after opening the chat the window title (and, for a group, its member-count
-  label) must match. The composer must be empty; the text is set as the composer's value and read back before Send is
+  all contacts and conversations (a conversation and its own contact row count as one), and after opening the chat the
+  window title must match and a member-count label must be present exactly for a group. The composer must be empty; the text is set as the composer's value and read back before Send is
   clicked. No keystroke is ever typed (the input method corrupts them). It works from any starting tab and clicks
-  each chat row once.
+  each chat row once. Every mouse event first checks that WeChat is frontmost and is the window under the pointer, and
+  the Send click re-verifies title, kind and composer text in the same helper run.
 - **Results.** `sent` means the window shows a new message with that text and the composer emptied, not that WeChat
   delivered it. `unconfirmed` means Send was used but the window did not show it: it may or may not have been sent,
   never resend, check the chat. Refusals (`refused_*`, `throttled`, `duplicate_send`, `send_log_unavailable`) send
   nothing. A refused send after the chat was opened still marks that chat read in WeChat.
-- **Log and limits.** `send-log.jsonl` in the state directory (mode 0600, append-only) records an attempt before Send
-  is used and a result after: time, conversation ID, a keyed HMAC of the text and its length, never the text. At most
+- **Log and limits.** `send-log.jsonl` in `~/Library/Application Support/WechatBridgeSend` (mode 0600, append-only, shared by every
+  bridge process of the user) records an attempt before Send is used and a result after: time, conversation ID, a keyed
+  HMAC of the text and its length, never the text. A refusal after the chat was opened is logged too. At most
   one send per 3 seconds and 30 per hour (attempts count, even unresolved ones), and the same text to the same
-  conversation is refused for 10 minutes. A `send.lock` in `~/Library/Application Support/WechatBridgeSend` serializes
-  sends across processes. These are guards against a runaway loop, not WeChat rules.
+  conversation is refused for 10 minutes (an attempt that was refused before Send was pressed no longer counts). A
+  `send.lock` next to the log serializes sends across processes; a send waits at most 30 seconds for it (`refused_busy`). These are guards against a runaway loop, not WeChat rules.
 - **Permission.** The Accessibility grant belongs to the app that launches the bridge (for example Claude.app) and
   covers everything that app runs. The tool returns `refused_no_accessibility` when it is missing. The UI helper
   (`wechat_ui.swift`) is compiled once into the state directory with `swiftc` (Xcode command line tools).
+- **Single account.** The recipient is resolved from the archive of the configured account, while the helper drives whichever
+  WeChat account is logged in. They must be the same account; do not switch accounts while sending is enabled. The window
+  shows no account indicator the bridge can check, so this is an assumption to confirm in the manual acceptance run.
+- **Helper build.** The first start with `--enable-send` compiles the helper in the background; a send before that finishes
+  compiles it inline and may exceed the client's timeout.
 - **Account risk.** Driving the desktop app is not an official WeChat API. The owner accepts that risk for personal,
   non-bulk use. Only use it for messages you would type yourself.
 

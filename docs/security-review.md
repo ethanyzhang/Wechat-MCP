@@ -491,7 +491,7 @@ Recommended soon after release:
   normalises SDK validation errors so caller values are never echoed
   (`mcp/server.py:83-108`). Dataclass fields holding paths, keys and usernames
   use `repr=False`.
-- **MCP surface.** stdio only; no network listener; ten read-only tools with
+- **MCP surface.** stdio only; no network listener; ten read-only tools (plus `send_message` only with `--enable-send`) with
   `additionalProperties: false`, strict pydantic types and regex-checked IDs;
   attachment responses bounded to 8 MiB source / 12 MiB wire; resource template
   re-validates IDs through `valid_id` in the service layer.
@@ -519,8 +519,8 @@ Recommended soon after release:
 
 ## 7. Residual risk
 
-- With `serve --enable-send` the bridge is no longer read-only: `send_message` types a text message into the WeChat
-  app through Accessibility. The threat is prompt injection from retrieved message text causing a send, and a
+- With `serve --enable-send` the bridge is no longer read-only: `send_message` puts a text message into the WeChat
+  composer and clicks Send through Accessibility (no keystrokes). The threat is prompt injection from retrieved message text causing a send, and a
   wrong-chat send. Controls: the tool exists only behind the flag; per-call client approval is required and documented;
   recipient name, kind and window title are bound and verified; no keystrokes; a durable attempt log, throttle and
   duplicate window; the Accessibility grant covers all of the host app. The sender fails closed, but its UI checks

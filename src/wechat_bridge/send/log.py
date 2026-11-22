@@ -1,4 +1,9 @@
-"""Send log, throttle and the cross-process send lock. The log holds keyed digests, never message text."""
+"""Send log, throttle and the cross-process send lock. The log holds keyed digests, never message text.
+
+Both live in one fixed per-user directory, so every bridge process on the machine shares one lock and one history:
+the rate limit and the duplicate window cannot be multiplied by registering the bridge with several state directories.
+(Digests are keyed by the account's identity key; two registrations of the same account share it.)
+"""
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -14,9 +19,10 @@ from ..core.errors import BridgeError
 MIN_INTERVAL_SECONDS = 3
 MAX_PER_HOUR = 30
 DUPLICATE_SECONDS = 600
+LOCK_WAIT_SECONDS = 30
 TAIL_BYTES = 65536
 LOG_NAME = 'send-log.jsonl'
-DEFAULT_LOCK_DIR = Path.home() / 'Library/Application Support/WechatBridgeSend'
+DEFAULT_DIR = Path.home() / 'Library/Application Support/WechatBridgeSend'
 
 
 def digest(key: bytes, text: str) -> str:
@@ -24,21 +30,31 @@ def digest(key: bytes, text: str) -> str:
 
 
 @contextmanager
-def send_lock(directory: Path = DEFAULT_LOCK_DIR):
-    """Exclusive per-user lock, outside any state directory so every bridge process on the machine shares it."""
+def send_lock(directory: Path = DEFAULT_DIR, *, wait=LOCK_WAIT_SECONDS, sleep=time.sleep, clock=time.monotonic):
+    """Exclusive per-user lock; raises refused_busy when another send holds it past `wait` seconds."""
     ensure_private_dir(directory)
     fd = os.open(directory / 'send.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        end = clock() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if clock() >= end:
+                    raise BridgeError('refused_busy') from None
+                sleep(0.2)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
 class SendLog:
-    def __init__(self, state_dir: Path, key: bytes, clock=time.time):
-        self.path, self.key, self.clock = state_dir / LOG_NAME, key, clock
+    def __init__(self, directory: Path, key: bytes, clock=time.time):
+        self.directory, self.path, self.key, self.clock = directory, directory / LOG_NAME, key, clock
 
     def _tail(self) -> list[dict]:
         try:
@@ -56,40 +72,72 @@ class SendLog:
             raise BridgeError('send_log_unavailable') from None   # an unreadable log is not "no history": refuse
         finally:
             os.close(fd)
+        lines = data.decode('utf-8', 'replace').splitlines()
+        if size > TAIL_BYTES:
+            lines = lines[1:]   # the first line of a tail window may be cut
         rows = []
-        for line in data.decode('utf-8', 'replace').splitlines()[1 if size > TAIL_BYTES else 0:]:
+        for line in lines:
             try:
                 rows.append(json.loads(line))
             except ValueError:
-                continue
+                # Damaged history cannot be trusted to hide a recent attempt: refuse rather than skip it.
+                raise BridgeError('send_log_unavailable') from None
         return rows
 
     def check_allowed(self, conversation_id: str, text: str) -> None:
-        """Raise throttled or duplicate_send. Attempts count, resolved or not, so an unknown outcome cannot be retried around."""
+        """Raise throttled or duplicate_send. Attempts count, resolved or not, so an unknown outcome cannot be retried around;
+        an attempt whose result says nothing was pressed (refused_*) no longer counts toward the hourly cap or the duplicate window."""
         now = self.clock()
-        attempts = [r for r in self._tail() if r.get('event') == 'attempt']
-        if attempts and now - attempts[-1]['time'] < MIN_INTERVAL_SECONDS:
+        rows = self._tail()
+        marker = digest(self.key, text)
+        events = [r for r in rows if r.get('event') in ('attempt', 'refused')]
+        if events and now - events[-1]['time'] < MIN_INTERVAL_SECONDS:
             raise BridgeError('throttled')
+        # A result closes the latest attempt with the same key; a refused one means nothing was pressed.
+        latest, attempts = {}, []
+        for r in rows:
+            key = (r.get('conversation_id'), r.get('text_hmac'))
+            if r.get('event') == 'attempt':
+                latest[key] = r; attempts.append(r)
+            elif r.get('event') == 'result' and str(r.get('state', '')).startswith('refused') and key in latest:
+                attempts.remove(latest.pop(key))
         if sum(1 for r in attempts if now - r['time'] < 3600) >= MAX_PER_HOUR:
             raise BridgeError('throttled')
-        marker = digest(self.key, text)
         if any(r['conversation_id'] == conversation_id and r['text_hmac'] == marker and now - r['time'] < DUPLICATE_SECONDS for r in attempts):
             raise BridgeError('duplicate_send')
 
     def _append(self, record: dict) -> None:
+        ensure_private_dir(self.directory)
+        created = not self.path.exists()
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             check_private_fd(fd)
-            os.write(fd, (json.dumps(record, sort_keys=True) + '\n').encode('utf-8'))
+            data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+            view = memoryview(data)
+            while view:   # os.write may be short; the record is complete or the send does not happen
+                view = view[os.write(fd, view):]
             os.fsync(fd)
         finally:
             os.close(fd)
+        if created:
+            directory_fd = os.open(self.directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
 
     def attempt(self, conversation_id: str, text: str) -> None:
         """Durable record written before the send control is used; raises if it cannot be written (the send then does not happen)."""
         try:
             self._append({'event': 'attempt', 'time': self.clock(), 'conversation_id': conversation_id,
                           'text_hmac': digest(self.key, text), 'text_length': len(text)})
+        except (OSError, BridgeError):
+            raise BridgeError('send_log_unavailable') from None
+
+    def refused(self, conversation_id: str) -> None:
+        """A refusal after the chat was opened still touches WeChat (it marks the chat read), so it counts toward the interval."""
+        try:
+            self._append({'event': 'refused', 'time': self.clock(), 'conversation_id': conversation_id})
         except (OSError, BridgeError):
             raise BridgeError('send_log_unavailable') from None
 

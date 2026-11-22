@@ -276,12 +276,14 @@ class QueryRepository:
             name = record.get('display_name')
             count = 0
             if isinstance(name, str) and name:
-                # The conversation itself and its own contact row (same source username) are one entity, not two.
-                own = record.get('source_username')
+                # Entities, not rows: a contact that already has a conversation (the conversation's own contact row, a
+                # group's chatroom row) is the same entity as that conversation and is not counted again.
                 count = db.execute("SELECT COUNT(*) FROM conversations WHERE generation=? AND json_extract(data,'$.display_name')=?",
                                    (generation, name)).fetchone()[0]
-                count += db.execute("SELECT COUNT(*) FROM contacts WHERE generation=? AND json_extract(data,'$.display_name')=? "
-                                    "AND COALESCE(json_extract(data,'$.source_username'),'')<>?", (generation, name, own or '')).fetchone()[0]
+                count += db.execute("SELECT COUNT(*) FROM contacts c WHERE c.generation=? AND json_extract(c.data,'$.display_name')=? "
+                                    "AND COALESCE(json_extract(c.data,'$.source_username'),'') NOT IN "
+                                    "(SELECT COALESCE(json_extract(v.data,'$.source_username'),'') FROM conversations v WHERE v.generation=?)",
+                                    (generation, name, generation)).fetchone()[0]
             return {'display_name': name if isinstance(name, str) and name else None, 'kind': record.get('kind'), 'name_count': count}
 
     @property
