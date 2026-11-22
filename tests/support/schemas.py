@@ -56,9 +56,9 @@ modify_time INTEGER,dir1 INTEGER,dir2 INTEGER,_rowid_ INTEGER,extra_buffer BLOB)
 }
 
 
-def account_case(tmp_path, *, changes=None):
+def account_case(tmp_path, *, changes=None, extra_schemas=None):
     root = (tmp_path / "synthetic-account").resolve()
-    for relative, sql in SCHEMAS.items():
+    for relative, sql in (SCHEMAS | (extra_schemas or {})).items():
         path = root / "db_storage" / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         with Engine(path) as writer:

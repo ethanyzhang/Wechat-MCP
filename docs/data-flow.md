@@ -138,7 +138,7 @@ Steps 6 and 7 run at query time and never touch the source databases.
 ### 7. MCP response
 
 - **Owner:** `mcp/service.py` (bytes and status, independent of protocol) and
-  `mcp/server.py` (ten typed read-only tools over stdio).
+  `mcp/server.py` (thirteen typed read-only tools over stdio).
 - **Does:** validates arguments, calls the repository, resolves attachments on
   demand, and encodes one compact JSON reply. Stdout carries protocol only.
 - **Attachments:** `attachments/resolver` opens the media file with a

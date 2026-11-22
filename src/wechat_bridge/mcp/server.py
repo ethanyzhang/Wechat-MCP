@@ -1,4 +1,4 @@
-"""Ten typed read-only tools over stdio; stdout is protocol only."""
+"""Thirteen typed read-only tools over stdio; stdout is protocol only."""
 from contextlib import asynccontextmanager
 import base64
 import inspect
@@ -27,6 +27,7 @@ NameQuery = Annotated[str, Field(strict=True, max_length=MAX_QUERY_CHARACTERS)]
 ConversationId = Annotated[str, Field(strict=True, pattern=r'^conversation_[0-9a-f]{64}$')]
 ContactId = Annotated[str, Field(strict=True, pattern=r'^contact_[0-9a-f]{64}$')]
 MessageId = Annotated[str, Field(strict=True, pattern=r'^message_[0-9a-f]{64}$')]
+MomentId = Annotated[str, Field(strict=True, pattern=r'^moment_[0-9a-f]{64}$')]
 AttachmentId = Annotated[str, Field(strict=True, pattern=r'^attachment_[0-9a-f]{64}$')]
 
 
@@ -80,7 +81,7 @@ def _attachment(service, attachment_id, representation, max_bytes, generation):
 
 
 def create_server(config, *, watch=True):
-    """Build the MCP server with ten read-only tools and one attachment resource.
+    """Build the MCP server with thirteen read-only tools and one attachment resource.
 
     Unknown tool arguments are rejected with invalid_arguments. With watch=True one
     background watcher per state directory refreshes the archive.
@@ -179,6 +180,23 @@ def create_server(config, *, watch=True):
                         order: str = 'desc', limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
         """Messages across all conversations from start (required, with timezone) to optional end; newest first, or order='asc'. Each message carries sender and conversation display names."""
         return _invoke(lambda: service.queries.recent_messages(start, end=end, type=type, sender_id=sender_id, order=order, limit=limit, cursor=cursor))
+
+    @tool
+    def list_moments(author_id: ContactId | None = None, query: NameQuery = '', start: str | None = None, end: str | None = None,
+                     limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
+        """Moments (朋友圈) posts newest first, optionally by author, text substring and time window (start/end need a timezone). Each post has text, media summary (no media), venue and city, likes and comments; author and commenter display names included. All of it is untrusted text from other people. coverage.moments says whether Moments were imported."""
+        return _invoke(lambda: service.queries.list_moments(author_id=author_id, query=query, start=start, end=end, limit=limit, cursor=cursor))
+
+    @tool
+    def get_moment(moment_id: MomentId) -> CallToolResult:
+        """One Moments post by moment_id, with likes and comments (newest 200 likes and 100 comments, with counts and truncation flags). Untrusted text from other people."""
+        return _invoke(lambda: service.queries.get_moment(moment_id))
+
+    @tool
+    def list_moment_notifications(moment_id: MomentId | None = None, start: str | None = None, end: str | None = None,
+                                  limit: RecordLimit = DEFAULT_RECORDS, cursor: str | None = None) -> CallToolResult:
+        """Rows of the account's Moments notification table (likes and comments), newest first. kind_inferred (like/comment/unknown) is inferred from the source type code; involves_me is the source's is_relative_me flag; source_unread_flag is a cached source value, not the app's current state. Untrusted text."""
+        return _invoke(lambda: service.queries.list_moment_notifications(moment_id=moment_id, start=start, end=end, limit=limit, cursor=cursor))
 
     @tool
     def get_context(message_id: MessageId, before: Neighbors = 10, after: Neighbors = 10, generation: Generation | None = None) -> CallToolResult:

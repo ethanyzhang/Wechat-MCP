@@ -63,6 +63,12 @@ class IdentityLookup:
     def conversation_id(self, username: str) -> str:
         return stable_id("conversation", (self.account_id, username), self._key)
 
+    def moment_id(self, tid: int) -> str:
+        return stable_id("moment", (self.account_id, str(tid)), self._key)
+
+    def notification_id(self, local_id: int) -> str:
+        return stable_id("moment_notification", (self.account_id, str(local_id)), self._key)
+
     def message_id(self, source) -> str:
         """Message ID from the database incarnation, table and local row."""
         return stable_id("message", (source.account_id, source.database_id, source.table, source.local_id), self._key)

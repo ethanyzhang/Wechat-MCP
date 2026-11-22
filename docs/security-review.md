@@ -491,7 +491,7 @@ Recommended soon after release:
   normalises SDK validation errors so caller values are never echoed
   (`mcp/server.py:83-108`). Dataclass fields holding paths, keys and usernames
   use `repr=False`.
-- **MCP surface.** stdio only; no network listener; ten read-only tools with
+- **MCP surface.** stdio only; no network listener; thirteen read-only tools with
   `additionalProperties: false`, strict pydantic types and regex-checked IDs;
   attachment responses bounded to 8 MiB source / 12 MiB wire; resource template
   re-validates IDs through `valid_id` in the service layer.
@@ -519,6 +519,11 @@ Recommended soon after release:
 
 ## 7. Residual risk
 
+- Moments (`list_moments`, `get_moment`, `list_moment_notifications`) add posts, likes and comments written by other people as a
+  new untrusted-content source for the client's model, like message text (H-5). The post XML also carries media keys, tokens,
+  hashes and coordinates: the parser (`adapters/moments.py`) copies a fixed whitelist and never the raw XML, drops `poiAddress`,
+  latitude and longitude, and a test searches the stored records and the archive file for the fixture's secrets. The optional
+  sns database is read behind its own schema check and failure isolation.
 - Same-user compromise is out of the bridge's threat model: keys, the identity
   secret and the plaintext archive are readable by any process of that user (H-1).
 - Untrusted content from contacts reaches the client's LLM context by design

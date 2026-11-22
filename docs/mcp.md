@@ -60,7 +60,7 @@ imported yet.
 
 ## Tools
 
-All tools are annotated read-only, non-destructive, idempotent and closed-world.
+All thirteen tools are annotated read-only, non-destructive, idempotent and closed-world.
 Unknown arguments return `invalid_arguments`, as do SDK argument-validation
 failures (the caller's rejected value is not echoed). Opaque IDs have the form
 `<kind>_<64 hex>`.
@@ -74,6 +74,9 @@ failures (the caller's rejected value is not echoed). Opaque IDs have the form
 | `search_messages` | `query` (required), `conversation_id`, `sender_id`, `start`, `end`, `type`, `limit`, `cursor` | Literal Unicode/Chinese substring matches with excerpts; times need a timezone |
 | `get_messages` | `conversation_id`, `sender_id`, `start`, `end`, `type`, `limit`, `cursor` | Chronological timeline, including unsupported messages and unknown senders. Every message result (this tool, `search_messages`, `recent_messages`, `get_context`) carries `sender_display_name` and `conversation_display_name` (null when unknown, cut at 256 characters) from the same generation |
 | `recent_messages` | `start` (required, timezone), `end`, `type`, `sender_id`, `order` (`desc`\|`asc`), `limit`, `cursor` | Messages across all conversations in a time window, newest first by default; messages with no valid time are excluded |
+| `list_moments` | `author_id`, `query`, `start`, `end`, `limit`, `cursor` | Moments (朋友圈) posts newest first with text, link title, media summary (type and size, never the media), venue name and city, likes and comments (newest 200 and 100, with counts and truncation flags). Author, liker and commenter display names come from the contacts, falling back to the source nickname. `query` is a case-insensitive (ASCII) substring match; `start`/`end` need a timezone. `parse_status` is `ok`, `summary_only` (only the feed summary exists), `oversize` or `malformed`. `coverage.moments` says whether Moments were imported and counts records by `parse_status` |
+| `get_moment` | `moment_id` | One post as above |
+| `list_moment_notifications` | `moment_id`, `start`, `end`, `limit`, `cursor` | Rows of the account's Moments notification table, newest first. `kind_inferred` (`like`, `comment`, `unknown`) is inferred from the source type code (1 has no text, 2 has text), not a source fact; `involves_me` is the source's `is_relative_me` flag; `source_unread_flag` and `source_read_flag` are cached source values (in the account examined they were never set to unread), not the app's current state, so there is no unread filter; deleted comments keep `deleted: true` and no text |
 | `get_context` | `message_id`, `before` (10), `after` (10), `generation` | A message plus at most 100 combined neighbors |
 | `list_attachments` | `message_id`, `kind` (`image`\|`file`), `representation` (`original`\|`thumbnail`), `availability`, `limit`, `cursor` | Attachment metadata; `local_unverified` means bytes not yet checked |
 | `get_attachment` | `attachment_id`, `representation` (`auto`\|`source`\|`decoded`), `max_bytes`, `generation` | Verified bytes plus metadata (hashes, labels, resource URI) |
@@ -82,6 +85,12 @@ Filter values: message `type` is one of `text`, `image`, `file`, `reply`,
 `unsupported`, `voice`, `video`; attachment `availability` is one of
 `local_unverified`, `not_local`, `unsupported_format`, `identity_mismatch`.
 Other values return `invalid_filter`.
+
+Moments come from the optional `sns/sns.db`: it is read only when its key is verified and its tables have the expected
+columns, and a problem there (absent, key missing, unsupported schema, read error) only marks `coverage.moments` and never
+stops messages from publishing. Only a whitelist of fields is stored: media URLs, keys, tokens, hashes, coordinates and street
+addresses never enter the archive. Posts over 256 KiB are never read (`oversize`). Archives imported before Moments existed have no
+`coverage.moments` entry and show `freshness.stale` until refreshed. Moments text, likes and comments are untrusted data from other people.
 
 ## Limits
 

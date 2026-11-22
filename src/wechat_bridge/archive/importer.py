@@ -11,7 +11,7 @@ from ..core.errors import BridgeError
 from ..source.discovery import discover
 from ..source.discovery import MESSAGE_SHARD
 from .reconcile import source_fingerprint
-from .store import Archive
+from .store import Archive, MOMENT_KINDS
 
 
 @contextmanager
@@ -43,6 +43,33 @@ def _write(archive, generation, kind, records, cancel_event=None):
             archive.write_records(generation, kind, batch); batch = []
     if batch:
         archive.write_records(generation, kind, batch)
+
+
+def _import_moments(archive, generation, adapter, cancel_event):
+    """Import Moments from the optional sns database; any failure drops only that part and is recorded, never blocks messages.
+
+    Returns the coverage entry: status (ok, not_present, key_missing, unsupported_schema or failed:<code>) and record counts by parse_status.
+    """
+    status = getattr(adapter, 'sns_status', 'not_present')
+    coverage = {'status': status, 'moments': {}, 'notifications': {}}
+    if status != 'available':
+        return coverage
+    counts = {'moments': {}, 'notifications': {}}
+    def counted(kind, records):
+        for record in records:
+            bucket = counts[kind]; bucket[record['parse_status']] = bucket.get(record['parse_status'], 0) + 1
+            yield record
+    try:
+        _write(archive, generation, 'moments', counted('moments', (asdict(r) for r in adapter.moments())), cancel_event)
+        _write(archive, generation, 'moment_notifications', counted('notifications', (asdict(r) for r in adapter.moment_notifications())), cancel_event)
+    except KeyboardInterrupt:
+        raise
+    except Exception as error:
+        if isinstance(error, BridgeError) and error.code == 'operation_cancelled':
+            raise
+        archive.discard(generation, tuple(MOMENT_KINDS))
+        return {'status': 'failed:' + (error.code if isinstance(error, BridgeError) else 'moments_import_failed'), 'moments': {}, 'notifications': {}}
+    return coverage | {'status': 'ok', 'moments': counts['moments'], 'notifications': counts['notifications']}
 
 
 def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
@@ -103,6 +130,7 @@ def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
             # Every message table in the source must map to a conversation; none may be dropped silently.
             if observed_tables != covered_tables:
                 raise BridgeError('message_table_mapping_incomplete')
+            sns = _import_moments(archive, generation, adapter, cancel_event)
             _write(archive, generation, 'observations',
                    ({'database_id': key, 'observed_at': value} for key, value in sorted(adapter.observations.items())), cancel_event)
             # Re-fingerprint after reading: a source that moved mid-import is not a snapshot.
@@ -116,7 +144,7 @@ def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
                                      'mapped_message_tables': len(covered_tables),
                                      'database_count': len(adapter.inventory.databases), 'account_wide_atomic_snapshot': False,
                                      'auxiliary_storage_unhandled': 'auxiliary_storage_unhandled' in adapter.inventory.issues,
-                                     'complete_phone_history': False}}
+                                     'complete_phone_history': False, 'moments': sns}}
             archive.publish(generation, metadata)
         except KeyboardInterrupt:
             archive.fail(generation, 'operation_cancelled')

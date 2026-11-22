@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import sys
 
 import pytest
@@ -11,7 +12,7 @@ from mcp.client.stdio import stdio_client
 from tests.integration.test_mcp_service import service_case
 from tests.support.images import png
 
-TOOLS = {'status', 'list_conversations', 'list_contacts', 'get_group', 'search_messages',
+TOOLS = {'status', 'list_moments', 'get_moment', 'list_moment_notifications', 'list_conversations', 'list_contacts', 'get_group', 'search_messages',
          'get_messages', 'recent_messages', 'get_context', 'list_attachments', 'get_attachment'}
 
 
@@ -94,13 +95,14 @@ def test_invalid_argument_values_are_normalized_without_echoing_input(tmp_path):
 def test_real_stdio_subprocess_handshake_delivery_and_reconnect(tmp_path):
     case, _ = service_case(tmp_path)
     parameters = StdioServerParameters(command=sys.executable,
-        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve', '--no-watch'])
+        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve', '--no-watch'],
+        env=dict(os.environ))   # the subprocess must import this checkout, not another install on the default path
     async def scenario():
         async with asyncio.timeout(20):
             async with Client(stdio_client(parameters)) as client:
                 await exercise(client)
             async with Client(stdio_client(parameters)) as client:
-                assert len((await client.list_tools()).tools) == 10
+                assert len((await client.list_tools()).tools) == len(TOOLS)
                 assert (await client.call_tool('status', {})).structured_content['active_generation'] is not None
     asyncio.run(scenario())
 

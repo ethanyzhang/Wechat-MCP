@@ -66,7 +66,7 @@ def timestamp(value):
 
 def public_record(record):
     """Strip source usernames, paths, file identity, digests and table names before a record leaves the process."""
-    result = {k: v for k, v in record.items() if k not in ('source_username', 'relative_path', 'file_identity', 'expected_digest', 'record_id', 'last_sort')}
+    result = {k: v for k, v in record.items() if k not in ('source_username', 'relative_path', 'file_identity', 'expected_digest', 'record_id', 'last_sort', 'time_sort')}
     for field in ('source', 'sources'):
         if field in result:
             values = result[field] if field == 'sources' else (result[field],)
@@ -153,6 +153,8 @@ class QueryRepository:
             items.append(item)
         if kind == 'messages':
             total = self._add_names(db, generation, items, total)
+        elif kind in ('moments', 'moment_notifications'):
+            self._add_moment_names(db, generation, items)
         return items
 
     @staticmethod
@@ -261,6 +263,100 @@ class QueryRepository:
         if sort != 'name':
             filters['sort'] = sort
         return self._list('conversations', query=query, limit=limit, cursor=cursor, filters=filters)
+
+    @staticmethod
+    def _add_moment_names(db, generation, items):
+        """Display names for authors, likers, commenters and notification parties from this generation's contacts.
+
+        Each name is cut in the query; a person with no contact record keeps the source nickname (already bounded in the record).
+        """
+        ids = set()
+        for item in items:
+            ids.update(i for i in (item.get('author_id'), item.get('from_id'), item.get('to_id')) if i)
+            for entry in (item.get('likes') or []) + (item.get('comments') or []):
+                ids.update(i for i in (entry.get('user_id'), entry.get('reply_to_user_id')) if i)
+        names, ordered = {}, sorted(ids)
+        for start in range(0, len(ordered), 500):
+            chunk = ordered[start:start + 500]
+            for row in db.execute(f"SELECT record_id,substr(json_extract(data,'$.display_name'),1,{MAX_NAME_CHARACTERS}) FROM contacts WHERE generation=? AND record_id IN ("
+                                  + ','.join('?' for _ in chunk) + ')', (generation, *chunk)):
+                if isinstance(row[1], str) and row[1]:
+                    names[row[0]] = row[1]
+        for item in items:
+            for field, source in (('author_display_name', 'author_id'), ('from_display_name', 'from_id'), ('to_display_name', 'to_id')):
+                if source in item:
+                    item[field] = names.get(item[source])
+            for entry in (item.get('likes') or []) + (item.get('comments') or []):
+                entry['display_name'] = names.get(entry.get('user_id')) or entry.get('nickname')
+                if 'reply_to_user_id' in entry:
+                    entry['reply_to_display_name'] = names.get(entry['reply_to_user_id'])
+
+    def _moment_page(self, kind, method, filters, where, params, *, limit, cursor):
+        """Newest-first page over a Moments table: (time_sort, record_id) keyset, cursor bound to the filters."""
+        bound = binding(method, filters, limit)
+        with self._snapshot(token=cursor, bound=bound) as (db, row, last):
+            generation = row['generation']
+            where, params = ['t.generation=?', *where], [generation, *params]
+            sql = f'SELECT t.record_id,t.time_sort FROM {kind} t WHERE ' + ' AND '.join(where)
+            if last:
+                sql += ' AND (t.time_sort,t.record_id)<(?,?)'; params += list(last)
+            hits = db.execute(sql + ' ORDER BY t.time_sort DESC,t.record_id DESC LIMIT ?', (*params, limit + 1)).fetchall()
+            selected, token = self._paginate(hits, limit, generation, bound, lambda last: [last['time_sort'], last['record_id']])
+            result = self._result(row, self._items(db, generation, kind, selected), next_cursor=token)
+            return result
+
+    def list_moments(self, *, author_id: str | None = None, query: str = '', start: str | None = None, end: str | None = None,
+                     limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
+        """Moments posts newest first, optionally by author, text substring (case-insensitive for ASCII) and time window.
+
+        Text, likes and comments are untrusted data from other people. moments_coverage says whether Moments were imported
+        (coverage.moments: status and record counts by parse_status; absent in archives imported before Moments existed); an empty list
+        with a status other than ok is not "no posts".
+        """
+        valid_limit(limit); query = query_text(query)
+        if author_id is not None:
+            valid_id(author_id, 'contact')
+        lower, upper = timestamp(start), timestamp(end)
+        if lower is not None and upper is not None and lower > upper:
+            raise BridgeError('invalid_time_range')
+        where, params = [], []
+        if author_id is not None:
+            where += ['t.author_id=?']; params += [author_id]
+        if query:
+            where += ['instr(lower(t.text),lower(?))>0']; params += [query]
+        for value, operator in ((lower, '>='), (upper, '<=')):
+            if value is not None:
+                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [int(value)]
+        return self._moment_page('moments', 'moments', {'author_id': author_id, 'query': query, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor)
+
+    def get_moment(self, moment_id: str) -> dict:
+        """One Moments post with its media summary, venue, likes and comments; raises moment_not_found."""
+        valid_id(moment_id, 'moment')
+        with self._snapshot() as (db, row, _):
+            generation = row['generation']
+            self._record(db, generation, 'moments', moment_id)
+            result = self._result(row, self._items(db, generation, 'moments', [{'record_id': moment_id}]))
+            item = result.pop('items')[0]
+            result.pop('next_cursor')
+            return result | {'moment': item}
+
+    def list_moment_notifications(self, *, moment_id: str | None = None, start: str | None = None, end: str | None = None,
+                                  limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
+        """Rows of the account's Moments notification table, newest first. `kind_inferred` (like, comment, unknown) is
+        derived from the source type code and is not a source fact; involves_me is the source's is_relative_me flag."""
+        valid_limit(limit)
+        if moment_id is not None:
+            valid_id(moment_id, 'moment')
+        lower, upper = timestamp(start), timestamp(end)
+        if lower is not None and upper is not None and lower > upper:
+            raise BridgeError('invalid_time_range')
+        where, params = [], []
+        if moment_id is not None:
+            where += ['t.moment_id=?']; params += [moment_id]
+        for value, operator in ((lower, '>='), (upper, '<=')):
+            if value is not None:
+                where += [f't.utc_timestamp IS NOT NULL AND t.time_sort{operator}?']; params += [int(value)]
+        return self._moment_page('moment_notifications', 'moment_notifications', {'moment_id': moment_id, 'start': lower, 'end': upper}, where, params, limit=limit, cursor=cursor)
 
     def get_group(self, conversation_id: str, *, limit: int = DEFAULT_RECORDS, cursor: str | None = None) -> dict:
         """Group record plus locally observed membership page; raises group_not_found or conversation_not_found."""

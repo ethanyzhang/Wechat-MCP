@@ -12,7 +12,12 @@ from ..core.serialize import compact_json
 KINDS = {'contacts': 'contact_id', 'conversations': 'conversation_id',
          'membership': 'record_id', 'messages': 'message_id',
          'replies': 'source_message_id', 'attachments': 'attachment_id',
-         'observations': 'database_id'}
+         'observations': 'database_id', 'moments': 'moment_id', 'moment_notifications': 'notification_id'}
+
+
+# Moments tables and their dedicated columns (author/time/text for filtering and sorting, like messages).
+MOMENT_KINDS = {'moments': ', author_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL, text TEXT',
+                'moment_notifications': ', moment_id TEXT, utc_timestamp TEXT, time_sort INTEGER NOT NULL'}
 
 
 def encode(value):
@@ -23,7 +28,8 @@ def encode(value):
 class Archive:
     """SQLite archive of generations; readers see only the generation archive_state points to.
 
-    The file is owner-only and opened with O_NOFOLLOW. Schema versions 0 to 2 are accepted.
+    The file is owner-only and opened with O_NOFOLLOW. Schema versions 0 to 2 are accepted; the Moments tables are
+    added to older archives on open (CREATE IF NOT EXISTS, same transaction), so no version bump is needed.
     """
     def __init__(self, config: Config):
         self.config = config
@@ -42,6 +48,8 @@ class Archive:
                 raise BridgeError('unsupported_archive_schema')
             if version == 0:
                 self._create(db)
+            else:
+                self._create_moment_tables(db)
 
     @contextmanager
     def connection(self, *, write=False):
@@ -76,6 +84,8 @@ class Archive:
         db.execute('CREATE TABLE archive_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1), active_generation INTEGER REFERENCES generations(generation))')
         db.execute('INSERT INTO archive_state VALUES(1,NULL)')
         for kind in KINDS:
+            if kind in MOMENT_KINDS:
+                continue
             extra = (', conversation_id TEXT, sender_id TEXT, type TEXT, timestamp TEXT, time_sort INTEGER NOT NULL, text TEXT' if kind == 'messages'
                      else ', message_id TEXT, kind TEXT, representation TEXT' if kind == 'attachments'
                      else ', conversation_id TEXT' if kind in ('membership', 'replies') else '')
@@ -85,7 +95,16 @@ class Archive:
         db.execute('CREATE INDEX message_type ON messages(generation,type,time_sort,record_id)')
         db.execute('CREATE INDEX attachments_message ON attachments(generation,message_id,record_id)')
         db.execute('CREATE INDEX membership_group ON membership(generation,conversation_id,record_id)')
+        self._create_moment_tables(db)
         db.execute('PRAGMA user_version=1')
+
+    @staticmethod
+    def _create_moment_tables(db):
+        for kind, extra in MOMENT_KINDS.items():
+            db.execute(f'CREATE TABLE IF NOT EXISTS {kind}(generation INTEGER NOT NULL REFERENCES generations(generation) ON DELETE CASCADE, record_id TEXT NOT NULL, data TEXT NOT NULL{extra}, PRIMARY KEY(generation,record_id))')
+        db.execute('CREATE INDEX IF NOT EXISTS moments_time ON moments(generation,time_sort,record_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS moments_author ON moments(generation,author_id,time_sort,record_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS moment_notifications_time ON moment_notifications(generation,time_sort,record_id)')
 
     def begin_generation(self, account_id: str) -> int:
         """Start a building generation and fail any interrupted one. Raises archive_account_mismatch."""
@@ -134,6 +153,10 @@ class Archive:
                     values += [record['message_id'], record['kind'], record['representation']]
                 elif kind in ('membership', 'replies'):
                     values += [record['conversation_id']]
+                elif kind == 'moments':
+                    values += [record['author_id'], record['utc_timestamp'], record['time_sort'], record['text']]
+                elif kind == 'moment_notifications':
+                    values += [record['moment_id'], record['utc_timestamp'], record['time_sort']]
                 db.execute(f'INSERT INTO {kind} VALUES(' + ','.join('?' for _ in values) + ')', values)
             # Version 2 archives keep the search index in step with each batch.
             if db.execute('PRAGMA user_version').fetchone()[0] == 2:
@@ -157,6 +180,15 @@ class Archive:
             if previous:
                 keep.append(previous[0])
             db.execute('DELETE FROM generations WHERE generation NOT IN (' + ','.join('?' for _ in keep) + ')', keep)
+
+    def discard(self, generation: int, kinds) -> None:
+        """Delete the given record kinds from a building generation (used to drop a half-read optional source)."""
+        with self.connection(write=True) as db:
+            self._require_building(db, generation)
+            for kind in kinds:
+                if kind not in KINDS:
+                    raise BridgeError('invalid_record_kind')
+                db.execute(f'DELETE FROM {kind} WHERE generation=?', (generation,))
 
     def fail(self, generation: int, code: str) -> None:
         """Mark a building generation failed with `code` and drop its rows; the active generation is untouched."""

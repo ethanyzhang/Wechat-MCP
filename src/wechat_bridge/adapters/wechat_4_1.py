@@ -6,6 +6,7 @@ retain diagnostics rather than inferred relationships.
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import plistlib
+import re
 import hashlib
 import heapq
 from dataclasses import replace
@@ -19,10 +20,11 @@ from ..source.keys import load_manifest, verify_keys
 from ..source.reader import open_source
 from .identity import IdentityLookup, load_identity_key
 from .models import Contact, Conversation, Membership, SourceRef
+from . import moments as moments_module
 from .schema import SchemaDescriptor, MSG_TABLE, inspect_schema
 from .wire import parse_fields
 
-ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v3"
+ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v4"
 # 270135 (auto-update, 14 Oct 2026) was accepted on evidence that every required
 # table and column is identical to 270102; see docs/compatibility.md.
 SUPPORTED_BUILDS = frozenset({"270102", "270135", "270390"})  # local experiment: 270390 (4.2.0) keys verified OK
@@ -38,6 +40,14 @@ RESOURCE_INFO = {"message_id": "INTEGER", "chat_id": "INTEGER", "message_local_i
 RESOURCE_DETAIL = {"resource_id": "INTEGER", "message_id": "INTEGER", "type": "INTEGER",
                    "size": "INTEGER", "data_index": "TEXT", "packed_info": "BLOB", "status": "INTEGER"}
 HARDLINK = {"md5": "TEXT", "file_name": "TEXT", "file_size": "INTEGER", "dir1": "INTEGER", "dir2": "INTEGER", "type": "INTEGER"}
+# Moments (sns/sns.db) is an optional database: it is read only when its key is verified and every table the reader needs has
+# the columns below. Table names with a numeric suffix (SnsTopItem_1, SnsMessage_tmp3) are matched by pattern and must be unique.
+SNS_TIMELINE = {"tid": "INTEGER", "user_name": "TEXT", "content": "TEXT"}
+SNS_TOP_ITEM = {"tid": "INTEGER", "username": "TEXT", "summary": "TEXT", "create_time": "INTEGER", "is_read": "INTEGER"}
+SNS_MESSAGE = {"local_id": "INTEGER", "create_time": "INTEGER", "type": "INTEGER", "feed_id": "INTEGER", "is_unread": "INTEGER",
+               "from_username": "TEXT", "from_nickname": "TEXT", "to_username": "TEXT", "content": "TEXT",
+               "del_status": "INTEGER", "is_relative_me": "INTEGER"}
+SNS_PAGE = 25   # rows per read: 25 x MAX_CONTENT_BYTES stays well inside the reader's 8 MiB result limit
 KNOWN_CONTACT_COLUMNS = frozenset("id username local_type alias encrypt_username flag delete_flag verify_flag remark remark_quan_pin remark_pin_yin_initial nick_name pin_yin_initial quan_pin big_head_url small_head_url head_img_md5 chat_room_notify is_in_chat_room description extra_buffer chat_room_type".split())
 KNOWN_MESSAGE_COLUMNS = frozenset("local_id server_id local_type sort_seq real_sender_id create_time status upload_status download_status server_seq origin_source source message_content compress_content packed_info_data WCDB_CT_message_content WCDB_CT_source".split())
 KNOWN_SESSION_COLUMNS = frozenset("username type unread_count unread_first_msg_srv_id unread_first_pat_msg_local_id unread_first_pat_msg_sort_seq is_hidden summary draft status last_timestamp sort_timestamp last_clear_unread_timestamp last_msg_locald_id last_msg_type last_msg_sub_type last_msg_sender last_sender_display_name last_msg_ext_type".split())
@@ -161,6 +171,7 @@ def open_adapter(config: Config, *, build: str | None = None):
     adapter.config, adapter.inventory, adapter.coverage = config, inventory, coverage
     adapter._keys = entries
     adapter._dbs = {d.relative_path: d for d in inventory.databases if d.required}
+    adapter._bind_sns(inventory, coverage, config)
     adapter.identities = IdentityLookup(inventory.account_id, load_identity_key(config))
     write_private_json(config.state_dir / "adapter-schemas.json", {"version": 1, "adapter_version": ADAPTER_VERSION,
                        "schemas": [s.private_dict() for s in schemas]})
@@ -178,6 +189,91 @@ class Wechat41Adapter:
         self.parse_status = "ok"
         self.observations = {}
         self._conversations = None
+
+    sns_status = "not_present"
+    _sns = None
+
+    def _bind_sns(self, inventory, coverage, config):
+        """Bind sns/sns.db as an optional source; any problem leaves it unavailable and never affects the message tables."""
+        db = next((d for d in inventory.databases if d.relative_path == "sns/sns.db"), None)
+        if db is None:
+            return
+        entry = next((e for e in coverage.verified_entries if e.database_id == db.database_id and e.relative_path == db.relative_path), None)
+        if entry is None:
+            self.sns_status = "key_missing"
+            return
+        try:
+            with open_source(db, entry.raw_key, config=config, profile=entry.profile) as reader:
+                schema = inspect_schema(reader)
+        except Exception:
+            self.sns_status = "failed:sns_schema_unreadable"
+            return
+        tables = {}
+        for key, pattern, columns in (("timeline", r"SnsTimeLine", SNS_TIMELINE), ("top", r"SnsTopItem_\d+", SNS_TOP_ITEM), ("messages", r"SnsMessage_tmp\d+", SNS_MESSAGE)):
+            found = [t for t in schema.tables if re.fullmatch(pattern, t.name) and t.has_rowid and t.has(columns)]
+            if len(found) != 1:
+                self.sns_status = "unsupported_schema"
+                return
+            tables[key] = found[0].name
+        self._sns = (db, entry, schema, tables)
+        self.sns_status = "available"
+
+    def _sns_rows(self, table_key, columns, *, page=SNS_PAGE):
+        """Keyset-paged rows of one sns table with an explicit column list (never *), one short transaction per page."""
+        db, entry, schema, tables = self._sns
+        quoted = schema.quote_table(tables[table_key])
+        cursor = None
+        with open_source(db, entry.raw_key, config=self.config, profile=entry.profile) as reader:
+            while True:
+                with reader.transaction() as tx:
+                    where = "WHERE rowid>?" if cursor is not None else ""
+                    rows = tx.query(f"SELECT rowid AS bridge_rowid,{columns} FROM {quoted} {where} ORDER BY rowid LIMIT {int(page)}",
+                                    (cursor,) if cursor is not None else (), max_rows=page)
+                    self.observations[db.database_id] = now_utc()
+                if not rows:
+                    return
+                for row in rows:
+                    yield row
+                cursor = rows[-1]["bridge_rowid"]
+
+    def moments(self):
+        """Yield Moment records: full posts from SnsTimeLine, then feed-summary-only posts. Needs sns_status == available.
+
+        The feed table can hold several rows per post; its read flag is used only when all of them agree.
+        """
+        flags, candidates = {}, {}
+        for row in self._sns_rows("top", "tid,username,substr(summary,1,2000) AS summary,create_time,is_read", page=100):
+            tid = row["tid"]
+            if type(tid) is not int:
+                continue
+            flags.setdefault(tid, set()).add(row["is_read"] if type(row["is_read"]) is int else None)
+            if tid not in candidates or (type(row["create_time"]) is int and row["create_time"] > (candidates[tid][2] or 0)):
+                candidates[tid] = (row["username"], row["summary"], row["create_time"] if type(row["create_time"]) is int else None)
+        def flag(tid):
+            values = flags.get(tid, set())
+            return next(iter(values)) if len(values) == 1 else None
+        seen = set()
+        limit = moments_module.MAX_CONTENT_BYTES
+        for row in self._sns_rows("timeline", f"tid,user_name,CASE WHEN length(content)<={limit} THEN content END AS content"):
+            tid = row["tid"]
+            if type(tid) is not int or tid in seen:
+                continue
+            seen.add(tid)
+            fallback = candidates.get(tid, (None, None, None))[2]
+            yield moments_module.parse_moment(tid, row["user_name"], row["content"] if isinstance(row["content"], str) else None,
+                                              self.identities, read_flag=flag(tid), fallback_time=fallback)
+        for tid in sorted(candidates):
+            if tid not in seen:
+                username, summary, created = candidates[tid]
+                yield moments_module.summary_moment(tid, username, summary, created, self.identities, read_flag=flag(tid))
+
+    def moment_notifications(self):
+        """Yield MomentNotification records from the sns message table. Needs sns_status == available."""
+        columns = ("local_id,create_time,type,feed_id,is_unread,from_username,substr(from_nickname,1,256) AS from_nickname,"
+                   "to_username,substr(content,1,2000) AS content,del_status,is_relative_me")
+        for row in self._sns_rows("messages", columns):
+            if type(row["local_id"]) is int:
+                yield moments_module.notification(row, self.identities)
 
     def _open(self, relative):
         if not hasattr(self, "config"):

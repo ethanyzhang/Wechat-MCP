@@ -8,6 +8,9 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ### Added
 
+- Read-only Moments tools `list_moments`, `get_moment` and `list_moment_notifications` over the optional `sns/sns.db`, with a field
+  whitelist, failure isolation from the message import, and `coverage.moments`. The adapter version changes, so existing archives show
+  `freshness.stale` until refreshed.
 - `list_conversations` returns `unread_count` and `last_timestamp`, and takes
   `unread_only` and `sort=recent` (newest activity first). A session table without
   the columns reports `session_unread_unavailable` instead of a silent null.

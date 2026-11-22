@@ -63,7 +63,7 @@ shows. It needs a full-resolution original image and independently confirmed
 samples, and it is blocked. Results are best effort until it passes. See
 `prove` in [architecture.md](architecture.md#key-contracts).
 
-**MCP.** Model Context Protocol. The bridge serves ten read-only tools to a
+**MCP.** Model Context Protocol. The bridge serves thirteen read-only tools to a
 client over stdio. See [mcp.md](mcp.md).
 
 **Opaque ID.** An identifier of the form `<kind>_<64 hex>`, derived by keyed
