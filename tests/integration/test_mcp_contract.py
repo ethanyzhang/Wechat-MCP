@@ -5,6 +5,7 @@ import pytest
 from mcp import Client
 
 from tests.integration.test_mcp_service import service_case
+from tests.support.live import factory
 
 ZERO = '0' * 64
 
@@ -14,7 +15,7 @@ def call(tmp_path, calls, monkeypatch=None):
     case, service = service_case(tmp_path)
 
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             out = []
             for name, arguments in calls:
                 result = await client.call_tool(name, arguments)
@@ -34,7 +35,7 @@ def call(tmp_path, calls, monkeypatch=None):
     ('list_contacts', {'limit': 201}),
     ('get_context', {'message_id': 'message_' + ZERO, 'before': 101}),
     ('get_context', {'message_id': 'message_' + ZERO, 'before': -1}),
-    ('get_context', {'message_id': 'message_' + ZERO, 'generation': 0}),
+    ('get_context', {'message_id': 'message_' + ZERO, 'generation': 1}),
     ('get_attachment', {'attachment_id': 'attachment_' + ZERO, 'max_bytes': 8 * 1024 * 1024 + 1}),
     ('get_attachment', {'attachment_id': 'attachment_' + 'A' * 64}),
     ('status', {'unexpected': 1}),
@@ -78,7 +79,7 @@ def test_decoded_representation_of_a_file_is_refused_explicitly(tmp_path):
     file_id = service.queries.list_attachments(kind='file')['items'][0]['attachment_id']
 
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             return await client.call_tool('get_attachment', {'attachment_id': file_id, 'representation': 'decoded'})
     result = asyncio.run(scenario())
     assert result.is_error and result.structured_content == {'error': 'unsupported_representation'}

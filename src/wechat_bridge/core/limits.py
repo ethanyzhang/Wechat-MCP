@@ -1,7 +1,7 @@
 """Public record/query API limits, reported verbatim by the MCP status tool.
 
 These describe the client-facing query contract only. Unrelated bounds that
-happen to share a value (SQLite row caps, archive/import batch sizes, schema
+happen to share a value (SQLite row caps, source read batch sizes, schema
 inspection caps) are deliberately NOT defined here, so changing one never moves
 another.
 """

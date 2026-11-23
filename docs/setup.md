@@ -4,7 +4,7 @@ Setup captures WeChat's per-database SQLCipher keys once and saves them in the
 private state directory. Every ordinary read afterwards uses the saved keys.
 
 Supported environment: macOS on Apple silicon (arm64), WeChat 4.1.15 builds
-270102 and 270135 (`SUPPORTED_BUILDS` in `src/wechat_bridge/adapters/wechat_4_1.py`).
+270102 and 270135, or 4.2.0 build 270390 (`SUPPORTED_VERSIONS` in `src/wechat_bridge/adapters/wechat_4_1.py`).
 The number of required databases is four fixed databases plus one per message
 shard, so it differs between accounts (see [compatibility.md](compatibility.md)).
 
@@ -35,7 +35,7 @@ shard, so it differs between accounts (see [compatibility.md](compatibility.md))
 | Requirement | Check |
 | --- | --- |
 | Apple silicon Mac, macOS, not running as root | `uname -m` prints `arm64` |
-| WeChat 4.1.15 at `/Applications/WeChat.app`, signed in on this Mac | `uv run wechat-bridge doctor` shows `wechat_version` and `wechat_build` |
+| WeChat 4.1.15 or 4.2.0 at `/Applications/WeChat.app`, signed in on this Mac | `uv run wechat-bridge doctor` shows `wechat_version` and `wechat_build` |
 | Apple Command Line Tools (provide `/usr/bin/lldb` and a `/usr/bin/python3` that imports `lldb`) | `xcode-select -p` prints a path; install with `xcode-select --install` |
 | SQLCipher native library (Homebrew `sqlcipher`, or built with `scripts/build_sqlcipher.py`) | `doctor` shows `"sqlcipher_available": true` |
 | Project environment | `uv sync --locked` (installs Python 3.14 if missing; `requires-python` is `>=3.14,<3.15`) |
@@ -55,7 +55,7 @@ Run every command from the repository root.
    `doctor` prints one JSON object with `python_version`, `architecture`,
    `sqlcipher_available`, `configured`, `wechat_version` and `wechat_build`.
    Continue only when `sqlcipher_available` is `true`, `wechat_version` is
-   `4.1.15` and `wechat_build` is `270102` or `270135`.
+   `4.1.15` and `wechat_build` is `270102` or `270135`, or `4.2.0` and `270390`.
 
 2. Discover the account and create the configuration.
 
@@ -203,7 +203,7 @@ stale, a file is a symlink or not a regular file you own, or deletion failed.
 A deletion failure does not fail or roll back setup. `setup recover` retries the
 deletion for a verified plan, and a repeat run is safe.
 
-Setup removes nothing else. `keys.json`, `identity.json`, the archive, the
+Setup removes nothing else. `keys.json`, `identity.json`, the
 `WeChat.disabled` app copy and the other plan files stay in place. Exclude the
 state directory from backups. Setups run before this change may still have the
 two files; delete them by hand after the plan reports `verified` and
@@ -228,7 +228,7 @@ capture starts. Once `setup run` has started copying, a failure appears as a
 | `setup_busy` | `setup run`, `recover` | Another setup or recovery process holds the lock. Wait for it to finish. |
 | `setup_recovery_required` | `setup run` | An earlier plan is unrecovered. Run `setup recover --plan-id <that plan>` first. |
 | `setup_copy_exists`, `invalid_setup_copy` | `setup run` (status) | The plan directory already holds a copy. Run `setup recover` for that plan, then `prepare` again. |
-| `unsupported_build` | `archive-refresh`, `inspect-schema`, `serve` watcher | See [When to run setup](#when-to-run-setup). Do not retry setup. |
+| `unsupported_build` | `search`, `inspect-schema`, any MCP tool | See [When to run setup](#when-to-run-setup). Do not retry setup. |
 | `status: partial_coverage` | `setup run` | Some required databases lack a verified key. Existing keys stay. Run `verify-keys`, then `setup prepare` and `setup run` once more. If it repeats, stop and report. |
 | `status: capture_timeout` | `setup run` | 150 s passed with no keys. Ask the person to confirm any login prompt in the WeChat window. Prepare and run again. |
 | `status: capture_process_ended` | `setup run` | The copy exited or crashed before it yielded keys. Prepare and run again once. If it repeats, stop and report. |
@@ -255,25 +255,23 @@ An unrecovered plan blocks new plans (`setup_recovery_required`). The
 
 ## After setup
 
-1. Import the history into the private archive. The first import is explicit
-   and can take a minute or more:
+1. Try a live read. There is no import step: every search and tool call reads
+   WeChat's databases directly.
 
    ```sh
-   uv run wechat-bridge archive-refresh
-   uv run wechat-bridge archive-status
+   uv run wechat-bridge search "hello" --limit 5
    ```
 
-   `archive-refresh` prints `"status": "complete"` and exits 0. If it prints
-   `"status": "failed"`, read its `error` code: `source_changed` means WeChat
-   wrote data during the import (run it again), and
-   `archive_refresh_in_progress` means another refresh is running (wait and
-   retry). `archive-status` exits 0 when `ready_for_local_queries` is `true`.
+   It prints matching messages as JSON and exits 0. An `{"error": ...}` line
+   with exit code 2 names the problem; see
+   [troubleshooting.md](troubleshooting.md).
 
 2. Register the MCP server with your client. Use the exact commands in
    [mcp.md](mcp.md#launching).
 
 3. Start a new client session so it loads the tool, then call the
-   `wechat_bridge` `status` tool and check that it reports a ready archive.
+   `wechat_bridge` `status` tool and check that it reports
+   `"ready_for_local_queries": true`.
    Do not report the connection as working until that call succeeds.
 
 Do not run setup again while `verify-keys` passes. A WeChat update that keeps

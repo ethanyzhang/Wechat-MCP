@@ -1,7 +1,7 @@
 """QueryRepository input validation: every external argument is strictly typed and bounded."""
 import pytest
 
-from tests.integration.test_search import repo_case
+from tests.support.live import repo_case
 from wechat_bridge.core.errors import BridgeError
 
 ZERO = "0" * 64
@@ -55,10 +55,6 @@ def test_equal_start_and_end_with_offsets_is_accepted_and_normalized_to_utc(repo
     (lambda r: r.get_context("message_" + ZERO, before=60, after=41), "invalid_context_limit"),
     (lambda r: r.get_context("message_" + ZERO, before=-1), "invalid_context_limit"),
     (lambda r: r.get_context("message_" + ZERO, before=True), "invalid_context_limit"),
-    (lambda r: r.get_context("message_" + ZERO, generation=0), "invalid_generation"),
-    (lambda r: r.get_context("message_" + ZERO, generation=1 << 63), "invalid_generation"),
-    (lambda r: r.get_context("message_" + ZERO, generation=True), "invalid_generation"),
-    (lambda r: r.get_context("message_" + ZERO, generation=99999), "cursor_expired"),
     (lambda r: r.get_context("message_" + ZERO), "message_not_found"),
     (lambda r: r.get_group("conversation_" + ZERO), "conversation_not_found"),
     (lambda r: r.get_context("contact_" + ZERO), "invalid_id"),

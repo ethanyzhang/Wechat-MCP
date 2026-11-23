@@ -2,6 +2,8 @@
 
 > Point-in-time review of the code as of v0.1.1. Current policy lives in [.github/SECURITY.md](../.github/SECURITY.md) and [architecture.md](architecture.md).
 
+> This review was written against the archive design (a private `archive.sqlite3` with generations, an importer, a watcher and the bridge's own search index). [design/live-source.md](design/live-source.md) replaced that design, so findings about the archive describe code that has been removed.
+
 Reviewed on 14 October 2026, after the six foundation modules moved into
 `src/wechat_bridge/core/`. This is a point-in-time review. The living
 description of record is [architecture.md](architecture.md). The review modified

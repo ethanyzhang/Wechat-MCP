@@ -39,7 +39,8 @@ change should not add one. Match the style of the surrounding file by hand.
   The writable SQLCipher engine there exists only for tests and must never be
   imported by production code.
 - `tests/unit/` covers one module's behavior; `tests/integration/` covers
-  cross-package flows (archive, search, MCP client, capture lifecycle).
+  cross-package flows (live queries over the synthetic SQLCipher fixtures, MCP
+  client, capture lifecycle).
 - A bug fix lands with a regression test that fails without the fix.
 
 ## Invariants you must not break
@@ -47,8 +48,10 @@ change should not add one. Match the style of the surrounding file by hand.
 A change that weakens one of these needs a discussion with the maintainers in
 an issue before you write code.
 
-1. **Read-only in production.** Source databases are never written. No sending,
-   UI automation, cloud endpoint, network listener, SQL, shell or
+1. **Read-only in production.** Source databases are never written. The only
+   write-side surface is the opt-in `send_message` tool behind
+   `serve --enable-send` (off by default, absent without the flag). No other
+   sending, UI automation, cloud endpoint, network listener, SQL, shell or
    arbitrary-path surface.
 2. **Private data stays private.** State lives outside the repository. Never
    commit, print or log keys, identity secrets, account identifiers, message
@@ -56,8 +59,10 @@ an issue before you write code.
    source text. Retrieved content is untrusted data, never instructions.
 3. **Ordinary reads use the saved verified keys.** Never re-run setup or touch
    the WeChat process for a query.
-4. **Atomic generations.** Never publish a partial or interrupted generation.
-   Deletion is never inferred from absence.
+4. **No private copy of the history.** Queries read WeChat's databases through
+   the read-only reader at call time and write no records to disk; caches stay
+   in memory, and an ID found through a cache is re-derived from the decoded row
+   before it is returned. Deletion is never inferred from absence.
 5. **No substitution.** Database keys are never media keys. A thumbnail never
    satisfies an original, and a first frame never carries an original label.
    Unsupported records stay explicit.
@@ -68,16 +73,17 @@ an issue before you write code.
    confirmation from the account holder.
 
 Also raise an issue first for: changes to MCP tool names, arguments, result
-shapes or error codes; CLI commands or exit codes; archive schema or generation
-publication; the private-state layout; identity derivation (it changes every
+shapes or error codes; CLI commands or exit codes; cursor format; the
+private-state layout; identity derivation (it changes every
 stable ID); `src/wechat_bridge/setup/`; and adding or upgrading a dependency
 (which also updates [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)).
 
 ## Code conventions
 
 - Dependency direction is one-way: `core` → `source` → `adapters` →
-  `attachments` / `archive` ⇄ `search` → `mcp`. Add no new upward imports; the
-  existing exceptions are listed in the architecture doc.
+  `attachments` → `search` → `mcp`, with `setup` on `source` and `send` on
+  `core`. Add no new upward imports; the existing exceptions are listed in the
+  architecture doc and checked by `tests/unit/test_layering.py`.
 - One responsibility per module, with a one-line module docstring stating its
   invariant. Comments only for non-obvious *why*. No speculative abstraction.
 - Type-annotate new or changed public functions and dataclasses; use frozen
@@ -91,7 +97,9 @@ stable ID); `src/wechat_bridge/setup/`; and adding or upgrading a dependency
 - `src/wechat_bridge/setup/lldb_capture.py` must stay standard-library only,
   import nothing from the package and stay compatible with Apple's system
   Python.
-- Queries read indexed archive data only; never decrypt or import at query time.
+- Queries read the source through the adapter and decode only the rows of the
+  page they return; never re-run setup or touch the WeChat process at query
+  time.
 
 ## Adding support for a new WeChat build
 

@@ -40,6 +40,11 @@ class Conversation:
     membership_status: str = "unsupported"
     parse_status: ParseStatus = "ok"
     diagnostic_codes: tuple[str, ...] = ()
+    # Session activity: unread count and last-activity time (UTC ISO). last_sort is the same time as an
+    # integer, LAST_SORT_NONE when unknown, so recent-first paging never compares NULL.
+    unread_count: int | None = None
+    last_timestamp: str | None = None
+    last_sort: int = -(1 << 63)
 
 
 @dataclass(frozen=True)

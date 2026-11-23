@@ -32,8 +32,12 @@ def attachment_refs(adapter, message):
     source = message.source
     if source.account_id != adapter.inventory.account_id or adapter.identities.message_id(source) != message.message_id:
         raise BridgeError("invalid_source_reference")
-    username = adapter.conversation(message.conversation_id).source_username
-    if not any(s.database_id == source.database_id and t == source.table for s, t in adapter._message_tables(username)):
+    # The decoder registered this message's table with its conversation; no full conversation scan is needed.
+    try:
+        conversation_id, username, _ = adapter.identities.conversation(source.database_id, source.table)
+    except BridgeError:
+        raise BridgeError("invalid_source_reference") from None
+    if conversation_id != message.conversation_id or not any(s.database_id == source.database_id and t == source.table for s, t in adapter.message_tables(username)):
         raise BridgeError("invalid_source_reference")
     schema = adapter._schemas["message/message_resource.db"]
     key = adapter.identities._key

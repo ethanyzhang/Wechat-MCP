@@ -131,6 +131,8 @@ def verify_keys(inventory: Inventory, candidates: KeyManifest, config: Config) -
                 status = "verified" if candidate.database_id == db.database_id else "replaced"
                 verified.append(replace(candidate, verified_at=now_utc()))
             except BridgeError as error:
+                if error.code == "source_busy":
+                    raise   # WeChat holds a write lock: transient, and says nothing about the key
                 status = {"key_or_format_mismatch": "key_or_format_mismatch",
                           "source_changed": "replaced", "unsupported_cipher_version": "unsupported"}.get(error.code, "unreadable")
         results.append(DatabaseCoverage(db.database_id, db.required, status))

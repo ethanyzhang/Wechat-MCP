@@ -1,7 +1,8 @@
 # Architecture
 
 `wechat-bridge` is a local, read-only, one-directional pipeline from WeChat's
-encrypted local databases to a private archive and a stdio MCP server. This page
+encrypted local databases to a stdio MCP server. Every query reads those
+databases at call time; the bridge keeps no copy of the history. This page
 describes the code as implemented; update it in the same change as any
 structural code change.
 
@@ -9,14 +10,15 @@ structural code change.
 flowchart LR
     S[setup/<br/>one-time key capture] -.keys.json.-> K
     D[(WeChat SQLCipher DBs + WAL)] --> K[source/<br/>discovery · keys · reader]
-    K --> A[adapters/<br/>builds 270102 · 270135 mappings]
-    A --> R[archive/<br/>generations · reconcile · watcher]
-    R --> I[search/<br/>index · repository · cursor]
+    K --> A[adapters/<br/>builds 270102 · 270135 · 270390 mappings]
+    A --> I[search/<br/>live repository · cursor · tokenize]
     F[(WeChat media files)] --> T[attachments/<br/>mapping · resolver · images]
     A --> T
+    T --> I
     I --> M[mcp/<br/>service · server]
     T --> M
     M --> C[MCP client over stdio]
+    M -.serve --enable-send.-> W[send/<br/>optional send_message]
     A --> P[proof.py<br/>acceptance gate]
     T --> P
 ```
@@ -29,11 +31,11 @@ invariant; read it before editing the module.
 | Package | Responsibility | Key modules |
 | --- | --- | --- |
 | `source/` | Lowest layer above `core/`. Inventory DB identities without decrypting; hold exact per-database keys; run read-only, query-only, authorizer-restricted, deadline-bounded SQLCipher transactions. Never merges WAL pages manually. | `discovery`, `keys`, `native` (ctypes bindings), `reader` |
-| `adapters/` | Interpret source rows for the supported builds only (`SUPPORTED_BUILDS` in `adapters/wechat_4_1.py`: 270102 and 270135 of WeChat 4.1.15). Bounded schema observation and identifier whitelisting; decode messages, replies, protobuf wire data; derive stable opaque IDs from a private persisted identity secret. Unmapped/malformed records keep their source identity and are reported, never dropped. | `wechat_4_1`, `schema`, `messages`, `replies`, `identity`, `wire`, `models` |
-| `archive/` | Private owner-only SQLite archive (separate from the source). Full bounded reconciliation into a *generation*; publish only a complete, stable-source generation via one atomic pointer. Failed/interrupted imports keep the prior generation; current + previous are retained. | `store`, `importer`, `reconcile`, `watcher` |
-| `search/` | FTS index built inside the import transaction; NFKC/casefold literal substring matching over Unicode unigrams/bigrams; small indexed queries with no decryption or import at query time; authenticated opaque cursors bound to method, filters, limit and a pinned generation. | `index`, `tokenize`, `repository`, `cursor` |
+| `adapters/` | Interpret source rows for the supported builds only (`SUPPORTED_VERSIONS` in `adapters/wechat_4_1.py`: 270102 and 270135 of WeChat 4.1.15, 270390 of 4.2.0). Bounded schema observation and identifier whitelisting; decode messages, replies, protobuf wire data; derive stable opaque IDs from a private persisted identity secret. Owns every SQL statement against WeChat, including keyset reads of message tables without decoding (`message_keys`, `local_ids`) and the optional `sns/sns.db` and `message/message_fts.db`, each bound only when its key is verified and its schema matches. Unmapped/malformed records keep their source identity and are reported, never dropped. | `wechat_4_1`, `schema`, `messages`, `replies`, `moments`, `identity`, `wire`, `models` |
+| `search/` | The live query layer. Each call opens a fresh adapter, merges per-table keysets in one total order, and decodes only the rows its page needs. In-memory caches, keyed by the stat signature of the databases they come from, map opaque IDs back to source rows. Search reads the content tables of WeChat's own text index and matches NFKC/casefolded literal substrings in Python. Authenticated opaque cursors are bound to method, filters and limit. Writes nothing to disk. | `repository`, `cursor`, `tokenize` |
 | `attachments/` | Exact resource/hardlink joins on tested layouts; no-follow descriptor reads pinned beneath the account's media roots with size/digest/streaming SHA-256 checks; static image decoding; Media key material is separate from database keys. | `mapping`, `resolver`, `images`, `models` |
-| `mcp/` | `service` produces verified bounded bytes and safe status independently of protocol; `server` exposes nine typed read-only tools over stdio (stdout is protocol only). See [mcp.md](mcp.md). | `service`, `server` |
+| `mcp/` | `service` produces verified bounded bytes and safe status independently of protocol; `server` exposes thirteen typed read-only tools over stdio (stdout is protocol only). See [mcp.md](mcp.md). | `service`, `server` |
+| `send/` | Optional text-only `send_message`, imported only by `serve --enable-send`. Drives the open WeChat app through a compiled Accessibility helper, with a send log and throttle outside the state directory. See [mcp.md](mcp.md#sending-optional-off-by-default). | `tool`, `sender`, `driver`, `macos`, `log` |
 | `setup/` | One-time key capture, never called by retrieval. Expiring plan → ad-hoc-signed *copy* of WeChat under Apple LLDB → page-authenticated, natively verified keys → idempotent recovery. See [setup.md](setup.md). | `prepare`, `capture`, `lldb_capture`, `recovery`, `lock`, `system` |
 | `proof.py` | Source-acceptance gate: private selection of samples with explicit expected values; redacted public report. | none |
 | `cli.py` | `wechat-bridge` entry point; lazy-imports each subsystem per command. | none |
@@ -48,27 +50,30 @@ orchestrate:
 | `core/errors.py` | `BridgeError(code)`. Public output is a code, never source material. |
 | `core/limits.py` | Public query-contract limits (values in [mcp.md](mcp.md#limits)). Other bounds live next to the code that uses them. |
 | `core/validate.py` | Shared strict input validators raising a caller-chosen `BridgeError` code. |
-| `core/serialize.py` | The single compact JSON encoding for archive storage and MCP text. |
+| `core/serialize.py` | The single compact JSON encoding for private state and MCP text. |
 | `core/clock.py` | UTC ISO-8601 timestamps. |
 
 ## Dependency direction
 
-The intended layering (module-level imports follow it):
+The intended layering (module-level imports follow it, and
+`tests/unit/test_layering.py` enforces it):
 
 ```
 foundation = core/ (config, errors, clock, validate, serialize, limits)
-  ← source ← adapters ← archive ⇄ search ← mcp
-                      ← attachments (also imported by search, mcp, proof)
+  ← source ← adapters ← attachments ← search ← mcp
   source ← setup
+  core ← send
 ```
+
+`attachments` is also imported by `mcp` and `proof.py`.
 
 Known exceptions, all function-local imports:
 
 | Import | Reason |
 | --- | --- |
-| `archive/importer.py`, `archive/store.py` → `search.index` | The search index is built inside the import transaction, so `archive` and `search` are coupled by design (`search` imports `archive.store` at module level). |
 | `adapters/wechat_4_1.py` → `attachments.mapping` | Attachment references are derived while adapting messages; `attachments.mapping` itself imports `adapters.identity` and `adapters.wire`. |
 | `mcp/service.py` → `cli.doctor` | `status()` reuses the CLI's environment report. |
+| `mcp/server.py` → `send.tool` | `send_message` is registered only with `serve --enable-send`, so a default server never imports `send/`. |
 
 Add no new upward imports. Move shared code down a layer.
 
@@ -85,15 +90,18 @@ Private state lives outside the repository, by default in
 
 | Path | Contents |
 | --- | --- |
-| `config.json`, `inventory.json` | Selected account root and native library path; discovered DB identities |
+| `config.json`, `inventory.json` | Selected account root and native library path; discovered DB identities, rewritten only when an incarnation is new or changed |
 | `keys.json` | Verified per-database keys. Never print, copy or commit. |
 | `identity.json` | Identity secret. Deleting it changes every stable ID. |
 | `image-material.json` | Optional explicit image-key candidates; when absent, material is derived from known app-data locations |
-| `adapter-schemas.json` | Schema observation written each time an adapter opens |
-| `archive.sqlite3` (+ WAL/SHM) | Archive generations and search index |
 | `setup/<plan-id>/`, `setup/active.json` | Setup plans, journals, capture diagnostics; the plan that owns setup now |
 | `proofs/<uuid>.json` | Private proof evidence |
-| `.lock`, `.archive-import.lock`, `.archive-watcher.lock`, `.setup.lock` | `flock` files, described under [Locks](#locks) |
+| `wechat-ui-<hash>` | Compiled send helper, built only with `serve --enable-send`; one per helper source version, safe to delete |
+| `.lock`, `.setup.lock` | `flock` files, described under [Locks](#locks) |
+
+Earlier versions also wrote `archive.sqlite3` (with `-wal` and `-shm`),
+`adapter-schemas.json`, `.archive-import.lock` and `.archive-watcher.lock`.
+The current code never opens them; the owner can delete them.
 
 The native SQLCipher library resolves to Homebrew's
 `/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib` if present, otherwise
@@ -103,15 +111,13 @@ The native SQLCipher library resolves to Homebrew's
 
 ### Locks
 
-All four are advisory `flock` files in the state directory (mode 0600,
+Both are advisory `flock` files in the state directory (mode 0600,
 `O_NOFOLLOW`). The kernel releases a lock when its process exits, so a crashed
 holder leaves no stale lock.
 
 | File | Taken by | Behaviour on contention |
 | --- | --- | --- |
 | `.lock` | `core.config.state_lock`: registry, key-manifest and identity-secret read-modify-write (`discover`, `publish_verified_manifest`, identity creation) | Blocks until free |
-| `.archive-import.lock` | `archive.importer.import_lock`: `archive-refresh`, watcher refreshes, `search-index` | Fails at once with `archive_refresh_in_progress` |
-| `.archive-watcher.lock` | `archive.watcher.run_exclusive`: one watcher per state directory across `serve` sessions | Waits and retries every 30 s; takes over when the holder exits |
 | `.setup.lock` | `setup.lock.setup_lock`: `setup run` and `setup recover` | Fails at once with `setup_busy`. A separate `setup/active.json` check returns `setup_recovery_required` while an earlier plan is unrecovered |
 
 ## Key contracts
@@ -142,32 +148,33 @@ holder leaves no stale lock.
   salt on a row flagged replaced, `verify-keys` restores the verified key's ID
   once that key opens the file, unless another row owns that ID. That run still
   reports `replaced` (exit 2); the next run reports `verified`.
-- **Generations:** a refresh either publishes a complete generation or leaves the
-  previous one active and marks status stale. A missing established message
-  shard (`source_shard_missing`) or an unmapped message table
-  (`message_table_mapping_incomplete`) blocks
-  publication; deletion is never inferred from absence. Abandoned `building`
-  generations are reclaimed at the next `begin_generation`, which also keeps
-  only the latest failed generation row (failed rows hold no records). After a crash,
-  reconciliation restarts the full bounded scan and does not resume batches.
-  This choice favors correctness over an unmeasured large-archive optimization.
-- **Watcher:** polls DB/WAL metadata (1 s debounce) and runs a full reconcile every
-  60 s while the source is changing. A reconcile that finds the source untouched
-  doubles the next interval, up to one hour, and a source change restores 60 s,
-  since every refresh rewrites the whole archive. Every attempt is followed by
-  idle time of four times its own duration (`MAX_DUTY_CYCLE`, 20%), so a busy
-  source or a repeating failure cannot hold a core. It runs independently of
-  queries; queries never trigger import. Concurrent
-  `serve` sessions coordinate on `.archive-watcher.lock` so only one watcher
-  polls per state directory at a time; the others retry the lock every 30 s and
-  take over if the holder exits. After a `setup_required`,
-  `key_coverage_incomplete`, `unsupported_build` or `archive_account_mismatch`
-  failure the watcher retries only when `keys.json` changes or after an hour,
-  since source writes cannot clear those states and each attempt records a
-  failed generation. A refresh that fails with another code is retried on the
-  next reconcile (60 s, never sooner than the duty-cycle rest). A refresh
-  blocked by `.archive-import.lock` returns `deferred` without recording a
-  generation.
+- **Live queries:** every MCP tool and the CLI `search` open a fresh adapter
+  (`open_adapter`: discovery, key check, schema check) per call, so new shards,
+  new message tables and replaced databases are seen at once. Messages have one
+  total order, `(sort, database_id, table, local_id)`, where `sort` is the
+  creation time in seconds or a sentinel below every valid time; per-table
+  keysets are merged in that order and only the rows of the requested page are
+  decoded. Message tables that no conversation maps to are skipped by
+  all-conversation queries and counted in `status.coverage`. A row that is
+  gone from the source is simply absent; nothing is inferred from absence.
+  A query can fail with `source_busy` while WeChat holds a write lock past the
+  busy timeout.
+- **Caches:** the query repository keeps in-memory maps (contacts and
+  conversations, per-shard message IDs and senders, attachments, Moments).
+  Each is keyed by the stat signature (database ID, inode, size, mtime of the
+  `.db` and its `-wal`) of exactly the databases it was built from and is
+  rebuilt lazily by the first query after a change. An ID resolved through a
+  cache is re-derived from the decoded row before it is returned. Caches hold
+  full adapter records; `public_record` redacts private fields at the response
+  boundary. Nothing is written to disk.
+- **Optional databases:** `message/message_fts.db` (WeChat's own full-text
+  index) and `sns/sns.db` (Moments) are bound only when their key is verified
+  and their tables have the expected columns. A problem with either only makes
+  search fail with `text_index_unavailable` or the Moments tools fail with
+  `moments_unavailable`; `status` reports `text_index_status` and
+  `moments_status`. The FTS5 virtual tables are never queried, because their
+  tokenizer exists only inside WeChat; only the plain `_content` tables are
+  read.
 - **Attachments:** files ≤ 200 MiB; images ≤ 50 MiB encoded/decoded and ≤ 40 M
   pixels. Static JPEG/PNG/WebP, legacy XOR and verified V1/V2 DAT decode;
   animated, WXGF and HEVC are unsupported. A thumbnail never stands in for an

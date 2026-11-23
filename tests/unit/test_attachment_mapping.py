@@ -1,5 +1,6 @@
 from tests.support.schemas import account_case, CHAT, TABLE
 from tests.support.encrypted import Engine
+from tests.support.live import conversation_messages
 import pytest
 
 
@@ -21,7 +22,7 @@ def test_exact_file_mapping_uses_only_supported_hardlinks(tmp_path, extra_type):
     if extra_type is not None:
         with Engine(cfg.account_root/'db_storage/hardlink/hardlink.db') as writer:
             writer.run(f"INSERT INTO dir2id(rowid,username) VALUES(2,'2026-02'); INSERT INTO file_hardlink_info_v4(md5,type,file_name,file_size,dir1,dir2) VALUES('{hashlib.md5(b'test').hexdigest()}',{extra_type},'local-copy.txt',4,2,0)")
-    a=open_adapter(cfg,build='270102');chat=next(c for c in a.conversations() if c.source_username==CHAT);message=next(a.message_batches(chat.conversation_id))[0]
+    a=open_adapter(cfg,build='270102');chat=next(c for c in a.conversations() if c.source_username==CHAT);message=conversation_messages(a, chat.conversation_id)[0]
     refs=a.attachment_refs(message)
     assert len(refs)==1
     with resolve_attachment(refs[0],cfg) as result:
@@ -49,7 +50,25 @@ def test_duplicate_resource_records_report_conflict_in_adapter(tmp_path):
     cfg=account_case(tmp_path,changes={
       'message/message_0.db':f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(1,123,{(6<<32)|49},1,1700000000,'<msg><appmsg><type>6</type><title>File</title></appmsg></msg>',0)",
       'message/message_resource.db':f"INSERT INTO ChatName2Id(rowid,user_name) VALUES(1,'{CHAT}'); INSERT INTO MessageResourceInfo(message_id,chat_id,message_local_id,message_svr_id,message_local_type,message_create_time) VALUES(5,1,1,123,{(6<<32)|49},1700000000),(6,1,1,123,{(6<<32)|49},1700000000); INSERT INTO MessageResourceDetail(resource_id,message_id,type,size,status) VALUES(1,5,3342339,4,1),(2,6,3342339,4,1)"})
-    a=open_adapter(cfg,build='270102');chat=next(c for c in a.conversations() if c.source_username==CHAT);message=next(a.message_batches(chat.conversation_id))[0]
+    a=open_adapter(cfg,build='270102');chat=next(c for c in a.conversations() if c.source_username==CHAT);message=conversation_messages(a, chat.conversation_id)[0]
     refs=a.attachment_refs(message)
     assert len(refs)==1
     assert refs[0].mapping_provenance=='conflicting'
+    # A fresh process resolves the derived conflict ID through its attachment index, never by name.
+    from wechat_bridge.search.repository import QueryRepository
+    fresh=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
+    assert fresh.attachment_ref(refs[0].attachment_id).mapping_provenance=='conflicting'
+    assert [i['attachment_id'] for i in fresh.list_attachments()['items']]==[refs[0].attachment_id]
+
+
+def test_a_resource_without_detail_rows_resolves_by_its_derived_id(tmp_path):
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    from wechat_bridge.search.repository import QueryRepository
+    cfg=account_case(tmp_path,changes={
+      'message/message_0.db':f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(1,123,{(6<<32)|49},1,1700000000,'<msg><appmsg><type>6</type><title>File</title></appmsg></msg>',0)",
+      'message/message_resource.db':f"INSERT INTO ChatName2Id(rowid,user_name) VALUES(1,'{CHAT}'); INSERT INTO MessageResourceInfo(message_id,chat_id,message_local_id,message_svr_id,message_local_type,message_create_time) VALUES(5,1,1,123,{(6<<32)|49},1700000000)"})
+    repo=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
+    listed=repo.list_attachments()['items']
+    assert len(listed)==1
+    fresh=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
+    assert fresh.attachment_ref(listed[0]['attachment_id']).attachment_id==listed[0]['attachment_id']

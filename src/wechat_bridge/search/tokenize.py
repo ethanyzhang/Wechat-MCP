@@ -1,9 +1,9 @@
-"""NFKC/casefolded literal matching; original text stays in the archive."""
+"""NFKC/casefolded literal matching; original text is never rewritten."""
 import unicodedata
 
 
 def normalize(text):
-    """NFKC, casefold and collapse whitespace; the same form is indexed and queried."""
+    """NFKC, casefold and collapse whitespace; queries and texts are compared in this form."""
     return ' '.join(unicodedata.normalize('NFKC', unicodedata.normalize('NFKC', text).casefold()).split())
 
 
@@ -50,22 +50,3 @@ def source_offset(text, normalized_offset):
             position += 1
             seen = True
     return len(text)
-
-
-def terms(text):
-    """Unigram and bigram index tokens of the normalized text, sorted."""
-    text = normalize(text)
-    singles = {'u' + format(ord(char), 'x') for char in text}
-    pairs = {'b' + format(ord(a), 'x') + 'x' + format(ord(b), 'x') for a, b in zip(text, text[1:])}
-    return tuple(sorted(singles | pairs))
-
-
-def match_expression(query, generation, kind):
-    """Return (normalized query, FTS expression) scoped to one generation and kind.
-
-    The FTS match only narrows candidates; callers confirm with an exact substring check.
-    """
-    normalized = normalize(query)
-    tokens = terms(normalized)
-    wanted = [t for t in tokens if t.startswith('b')] or list(tokens)
-    return normalized, ' AND '.join('"' + t + '"' for t in (f'z{generation}', 'k' + kind, *wanted))

@@ -26,25 +26,22 @@ direction, see [architecture.md](architecture.md).
     rows -> Message, Reply, AttachmentRef records
         |
         v
- 5. import (archive/importer)  full reconcile -> new generation N
-    search rows written in the same transaction (search/index)
-        |  source fingerprint before == after ?
-        |    yes: publish N atomically      no: fail N, keep N-1
-        v
-                                              archive.sqlite3 (generations + FTS index)
-                                                       |
- 6. query (search/repository)  <-----------------------+  indexed reads only
+ 5. query (search/repository)   in-memory ID caches, no files
+    one fresh adapter per call; decodes only the rows of the page
         |
         v
- 7. respond (mcp/service, mcp/server)  ---> stdio ---> MCP client
+ 6. respond (mcp/service, mcp/server)  ---> stdio ---> MCP client
         ^
         | attachment bytes: attachments/ reads media files, no-follow, pinned
         | beneath the account's media roots
  WeChat media files (never written)
 ```
 
-Steps 1 to 5 run at import time (`archive-refresh`, or the `serve` watcher).
-Steps 6 and 7 run at query time and never touch the source databases.
+Steps 1 and 2 first run as explicit commands (`discover`, `verify-keys`).
+After that, every MCP tool call and every CLI `search` runs steps 1 to 6: the
+adapter it opens rediscovers the databases and checks the saved keys (without
+changing `keys.json`) before it reads. There is no import step and no private
+copy of the history.
 
 ## Step by step
 
@@ -55,7 +52,9 @@ Steps 6 and 7 run at query time and never touch the source databases.
   `.db` file (the SQLCipher salt), and records a database ID per relative path
   and salt. It decrypts nothing and reads no message.
 - **Output:** `<state-dir>/inventory.json` and counts such as `database_count`
-  and `replaced_count`.
+  and `replaced_count`. The file is rewritten only when a database incarnation
+  is new or changed, so the discovery that every query runs writes nothing in
+  the common case.
 - **Bounds:** 4096 directory entries (`source_inventory_limit`), no symlinks
   (`source_symlink`), relative paths with no `..`.
 - **Required set:** four fixed databases plus every `message/message_<n>.db`
@@ -72,8 +71,7 @@ Steps 6 and 7 run at query time and never touch the source databases.
 - **Bounds:** a missing `keys.json` returns `setup_required`; incomplete
   required coverage returns `key_coverage_incomplete`. Neither starts a
   debugger.
-- **Where keys come from:** one-time `setup/` capture, never at query or
-  import time.
+- **Where keys come from:** one-time `setup/` capture, never at query time.
 
 ### 3. Read
 
@@ -92,7 +90,7 @@ Steps 6 and 7 run at query time and never touch the source databases.
 
 - **Owner:** `adapters/` (`wechat_4_1`, `schema`, `messages`, `replies`,
   `identity`, `wire`).
-- **Does:** checks the installed build (270102 or 270135 of 4.1.15), observes
+- **Does:** checks the installed build (270102 or 270135 of 4.1.15; 270390 of 4.2.0), observes
   each schema against a whitelist, decodes message content (including
   Zstandard text, XML and protobuf), and derives opaque IDs
   (`<kind>_<64 hex>`) with keyed HMAC-SHA256 from the secret in `identity.json`.
@@ -103,42 +101,28 @@ Steps 6 and 7 run at query time and never touch the source databases.
 - **Rule:** unmapped or malformed records keep their source identity and are
   reported. The adapter does not drop them.
 
-### 5. Import and publish
-
-- **Owner:** `archive/importer.py`, `archive/store.py`, with `search/index.py`.
-- **Does:** under `.archive-import.lock`, begins a generation and writes
-  contacts, conversations, memberships, messages, replies, attachment refs and
-  observations. The search index rows go in the same transaction. A final
-  source fingerprint (path, inode, size and timestamp of each `.db` and
-  `.db-wal` file) must equal the first one.
-- **Publish:** one atomic pointer update makes the generation active. The
-  store keeps the current and previous complete generations.
-- **Blocks publication:** `source_changed`, `source_shard_missing`,
-  `message_table_mapping_incomplete`, `archive_account_mismatch`. A blocked
-  refresh records a failed generation with no records and leaves the prior
-  generation active.
-- **Bounds:** one importer at a time (`archive_refresh_in_progress` for a
-  second); an interrupted run restarts the full scan.
-- **Driver:** the watcher polls file metadata (1 s debounce) and reconciles
-  every 60 s while the source changes, backing off to hourly while it is
-  untouched, and rests after each refresh to cap its duty cycle at 20%. Queries
-  never trigger an import.
-
-### 6. Search and query
+### 5. Query
 
 - **Owner:** `search/repository.py`, `search/tokenize.py`, `search/cursor.py`.
-- **Does:** reads only the archive. Query text is NFKC-normalized and
-  casefolded, then matched as a literal substring over Unicode unigrams and
-  bigrams. Cursors are authenticated and bound to the method, filters, limit
-  and pinned generation.
+- **Does:** opens a fresh adapter for each call. Timelines merge the keysets
+  of the relevant message tables in one total order (creation time, database,
+  table, row), with time, sender and type filters pushed into SQL, and decode
+  candidates in small batches until the page is full. Search reads the
+  plain-text content tables of WeChat's own index (`message/message_fts.db`),
+  matches the NFKC-normalized, casefolded query as a literal substring in
+  Python, and confirms each hit on the decoded message. In-memory caches map
+  opaque IDs back to source rows; each is keyed by the stat signature of the
+  databases it came from. Cursors are authenticated and bound to the method,
+  filters and limit, and resume from a keyset position in the live data.
 - **Bounds:** query of at most 256 characters, 50 records by default and 200 at
-  most, 100 combined context neighbors, 8 MiB read budget, 2 s deadline
-  (`archive_query_failed`).
+  most, 100 combined context neighbors, 8 MiB per result page
+  (`content_too_large`), plus the reader bounds of step 3 for every statement.
+- **Writes:** nothing. The caches live only in the `serve` process.
 
-### 7. MCP response
+### 6. MCP response
 
 - **Owner:** `mcp/service.py` (bytes and status, independent of protocol) and
-  `mcp/server.py` (nine typed read-only tools over stdio).
+  `mcp/server.py` (thirteen typed read-only tools over stdio).
 - **Does:** validates arguments, calls the repository, resolves attachments on
   demand, and encodes one compact JSON reply. Stdout carries protocol only.
 - **Attachments:** `attachments/resolver` opens the media file with a
@@ -157,8 +141,8 @@ Steps 6 and 7 run at query time and never touch the source databases.
 | WeChat databases | Opened read-only; no write, no DDL, no `ATTACH` | Flags, `query_only`, authorizer in `source/reader.py` |
 | WeChat media | Read through no-follow descriptors; never modified | `attachments/resolver.py` |
 | Private state | Owner-only, symlink-rejecting, atomic writes | `core/config.py` |
-| Query time | No decrypt, no import, no source read | `search/` reads the archive only |
-| MCP surface | Nine read-only tools; no SQL, shell, send or arbitrary path | `mcp/server.py` tool set |
+| Query time | Source reads through the read-only reader only; no disk writes beyond an `inventory.json` update for a new or changed incarnation | `search/repository.py`, `source/discovery.py` |
+| MCP surface | Thirteen read-only tools; no SQL, shell or arbitrary path; `send_message` exists only with `serve --enable-send` | `mcp/server.py` tool set |
 
 Setup is the one exception to "never touches WeChat". It launches a signed
 copy of the app under LLDB, once. See [setup.md](setup.md).

@@ -97,7 +97,7 @@ def read_selected_message(adapter, selector):
         conv = next((c for c in adapter.conversations() if c.conversation_id == selector["conversation_id"]), None)
         if conv is None:
             raise BridgeError("selected_sample_missing")
-        mapping = [(s, t) for s, t in adapter._message_tables(conv.source_username) if s.database_id == dbid and t == table]
+        mapping = [(s, t) for s, t in adapter.message_tables(conv.source_username) if s.database_id == dbid and t == table]
         if len(mapping) != 1:
             raise BridgeError("selected_source_missing_or_replaced")
         schema = mapping[0][0]
@@ -238,7 +238,7 @@ def run_proof(config, selection: ProofSelection) -> ProofReport:
     """
     checks = {name: ProofCheck("blocked", ("source_not_readable",)) for name in ("key_coverage", "schema", "ground_truth", *SAMPLES)}
     versions = {"python": platform.python_version(), "decoder": DECODER_VERSION}
-    coverage = {}; observations = {}; schemas = []
+    coverage = {}; observations = {}; schemas = []; adapter = None
     try:
         synthetic = selection.expectation_basis == "synthetic_fixture"
         # Only the in-process synthetic fixture interface can inject its build.
@@ -272,6 +272,9 @@ def run_proof(config, selection: ProofSelection) -> ProofReport:
     except BridgeError as error:
         target = "schema" if error.code in ("unsupported_build", "unsupported_schema") else "key_coverage"
         checks[target] = ProofCheck("blocked", (error.code,))
+    finally:
+        if adapter is not None:
+            adapter.close()
     status = "failed" if any(c.status == "failed" for c in checks.values()) else "passed" if all(c.status == "passed" for c in checks.values()) else "blocked"
     path = config.state_dir / "proofs" / (str(uuid.uuid4()) + ".json")
     report = ProofReport(status, checks, versions, coverage, observations, path,

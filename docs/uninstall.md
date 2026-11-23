@@ -39,8 +39,11 @@ If you registered a client by hand with a JSON definition, delete the
 
 ## 2. Delete the state directory
 
-The directory holds your keys, the identity secret and a searchable copy of
-your history. Deleting it is the step that removes your data.
+The directory holds your database keys, which unlock your WeChat history,
+and the identity secret. Versions that still had the archive also kept a
+searchable copy of your history there. Deleting the directory is the step that
+removes your data, except the send log described under "Folders outside the
+state directory" below.
 
 ```sh
 rm -r "<state-dir>"
@@ -50,11 +53,10 @@ rm -r "<state-dir>"
 | --- | --- |
 | `keys.json` | Verified database keys |
 | `identity.json` | Identity secret |
-| `archive.sqlite3` (and `-wal`, `-shm`) | Archive and search index |
-| `config.json`, `inventory.json`, `adapter-schemas.json` | Account selection and database inventory |
+| `config.json`, `inventory.json` | Account selection and database inventory |
 | `setup/` | Setup plans, journals and capture logs |
 | `proofs/` | Private proof evidence, if you ran `prove` |
-| `.lock`, `.archive-import.lock`, `.archive-watcher.lock`, `.setup.lock` | Lock files |
+| `.lock`, `.setup.lock` | Lock files |
 
 [architecture.md](architecture.md#runtime-state) lists the full layout.
 
@@ -70,6 +72,12 @@ the directory and clean it up by hand.
 - **`setup/<plan-id>/captured.json` and `candidates.json`.** Raw key copies
   from setups that older versions ran. Current versions delete both once the
   keys verify and recovery completes. Delete them by hand if they remain.
+- **`archive.sqlite3`, `archive.sqlite3-wal`, `archive.sqlite3-shm` and
+  `adapter-schemas.json`.** The private archive (a full copy of your message
+  history) and a schema file that earlier versions wrote. The current code
+  never reads them. Delete them; a running `serve` started from an older
+  version may still use the archive until its client restarts it. The lock
+  files `.archive-import.lock` and `.archive-watcher.lock` are unused too.
 - **`decoded/`.** A decoded-image cache that earlier versions wrote. Version
   0.1.1 removed the cache, so the folder is safe to delete.
 
@@ -79,6 +87,11 @@ the directory and clean it up by hand.
   `scripts/build_sqlcipher.py`. Delete `~/.local/share/wechat-bridge`.
   Homebrew's `sqlcipher` lives elsewhere; `brew uninstall sqlcipher` removes it
   if nothing else needs it.
+- `~/Library/Application Support/WechatBridgeSend` exists only if you ran the
+  server with `--enable-send`. It holds the send log (timestamps, conversation
+  IDs and keyed digests of sent text). Delete it after stopping every bridge
+  process. If you granted Accessibility to the terminal or client for sending,
+  revoke it in System Settings, Privacy & Security.
 - The project folder, for example `~/Wechat-MCP` with its `.venv`. Delete it
   after step 1, because the registered command pointed into it.
 
@@ -94,8 +107,8 @@ tmutil removeexclusion "<state-dir>"
 The command can fail once the directory no longer exists. A stale exclusion is
 harmless, so skip it in that case.
 
-Backups made before you added the exclusion may still hold the keys and the
-archive. Delete those copies in Time Machine if you want the history gone from
+Backups made before you added the exclusion may still hold the keys and,
+from earlier versions, the archive. Delete those copies in Time Machine if you want the history gone from
 your backups too.
 
 ## 4. Confirm nothing remains

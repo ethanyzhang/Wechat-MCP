@@ -21,7 +21,7 @@ Want to contribute? Read [.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md).
 | Document | Owns |
 | --- | --- |
 | [architecture.md](architecture.md) | Packages, dependency direction, runtime state, key contracts and limits |
-| [mcp.md](mcp.md) | MCP tools, arguments, limits, attachment delivery, paging, errors, client registration |
+| [mcp.md](mcp.md) | MCP tools, arguments, limits, attachment delivery, paging, errors, client registration, and the optional send tool (`serve --enable-send`) |
 | [setup.md](setup.md) | One-time key capture procedure, outcomes and recovery |
 | [compatibility.md](compatibility.md) | Tested environment, format support, latest live observations, known gaps |
 | [troubleshooting.md](troubleshooting.md) | Error codes and symptoms, what each means, the safe next step |
@@ -29,10 +29,17 @@ Want to contribute? Read [.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md).
 | [glossary.md](glossary.md) | Terms used across the docs, each linked to its owning document |
 | [uninstall.md](uninstall.md) | Removing the MCP registration, state directory, app copy and backup exclusion |
 
+## Designs
+
+| Document | Subject |
+| --- | --- |
+| [design/live-source.md](design/live-source.md) | Querying WeChat's databases live and removing the private archive: measurements, caches, result envelope, cursors, migration |
+
 ## Reviews
 
 Point-in-time assessments of the codebase. Each describes the code as of its
-writing.
+writing; all three predate the live-source design, so their archive findings
+describe removed code.
 
 | Document | Subject |
 | --- | --- |
