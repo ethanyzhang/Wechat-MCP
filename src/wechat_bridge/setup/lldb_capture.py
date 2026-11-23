@@ -28,6 +28,56 @@ def verified(key, page):
     return hmac.compare_digest(actual, page[4032:4096])
 
 
+class PassphraseTally:
+    """Count distinct 256000-round PBKDF inputs for one run, in memory only.
+
+    A secret is never written or emitted. Distinct secrets are told apart by a
+    fingerprint: the first 8 bytes of HMAC-SHA256 keyed with a fresh random key
+    that lives only in this object, so a fingerprint cannot be brute-forced
+    offline and cannot be compared across runs. 2-round calls carry the derived
+    page key, not a passphrase, and are not tallied here.
+    """
+    def __init__(self):
+        self._mac_key = os.urandom(32)
+        self._calls = {}
+        self.rounds = {'matched_salt_calls_256000': 0, 'matched_salt_calls_2': 0}
+
+    def observe(self, rounds, secret):
+        """Count one matched call; only a 256000-round input is a passphrase candidate."""
+        if rounds == 256000:
+            self.rounds['matched_salt_calls_256000'] += 1
+            self._calls[secret] = self._calls.get(secret, 0) + 1
+        else:
+            self.rounds['matched_salt_calls_2'] += 1
+
+    def report(self, rows, budget=60.0, clock=time.monotonic):
+        """Per distinct secret: calls and how many databases it opens.
+
+        Derives PBKDF2-SHA512(secret, salt, 256000) for each distinct salt and
+        page-verifies it, so a passphrase shared by several databases shows as
+        one entry with databases_verified > 1. Stops at `budget` seconds and
+        marks the remaining entries truncated.
+        """
+        deadline = clock() + budget
+        salts = sorted({page[:16] for _, page in rows})
+        out = []
+        for secret, calls in sorted(self._calls.items(), key=lambda kv: -kv[1]):
+            fp = hmac.new(self._mac_key, secret, hashlib.sha256).hexdigest()[:16]
+            entry = {'fp': fp, 'calls': calls}
+            opened, truncated = 0, False
+            for salt in salts:
+                if clock() > deadline:
+                    truncated = True
+                    break
+                key = hashlib.pbkdf2_hmac('sha512', secret, salt, 256000, 32)
+                opened += sum(1 for _, page in rows if page[:16] == salt and verified(key, page))
+            entry['databases_verified'] = opened
+            if truncated:
+                entry['truncated'] = True
+            out.append(entry)
+        return out
+
+
 def private_json(path, data):
     p = Path(path)
     p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -70,7 +120,9 @@ def main():
     macsalts = {bytes(x^0x3a for x in s): s for s in salts}
     found = {}
     counts = {'pbkdf_calls':0,'matched_salt_calls':0}
+    tally = PassphraseTally()
     os.umask(0o077)
+    started = time.monotonic()
     debugger = lldb.SBDebugger.Create()
     debugger.SetAsync(True)
     debugger.SkipLLDBInitFiles(True)
@@ -133,6 +185,7 @@ def main():
                     counts['matched_salt_calls']+=1
                     secret=mem(pp,pl)
                     if len(secret)!=pl: continue
+                    tally.observe(rounds,secret)
                     key=hashlib.pbkdf2_hmac('sha512',secret,salt,256000,32) if rounds==256000 else secret
                     if len(key)!=32: continue
                     changed=False
@@ -150,7 +203,16 @@ def main():
             if time.monotonic()-last_update>15:
                 emit('waiting',verified_databases=len(found),**counts)
                 last_update=time.monotonic()
-        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),**counts)
+        # The parent kills the helper at 240 s (system.py); leave a margin and never let a diagnostic
+        # failure or delay replace a finished capture whose keys are already saved.
+        # The helper no longer needs the app: close it before the slow derivations.
+        if process.IsValid() and process.GetState() not in (lldb.eStateExited,lldb.eStateDetached,lldb.eStateInvalid):
+            process.Kill()
+            emit('owned_process_closed',pid=pid)
+        secrets_error=False
+        try: secrets=tally.report(rows,budget=min(60,started+225-time.monotonic()))
+        except Exception: secrets,secrets_error=[],True
+        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,**counts,**tally.rounds)
         if found:
             return 0
         return 4 if process_ended else 3

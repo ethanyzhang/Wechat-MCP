@@ -17,6 +17,9 @@ def test_native_process_exit_without_keys_is_not_timeout(tmp_path, exit_code):
     assert result.returncode == 4, (result.stdout, result.stderr)
     ended = next(e for e in events if e["type"] == "process_ended")
     assert ended["exit_status"] == exit_code
+    finished = next(e for e in events if e["type"] == "capture_finished")
+    assert finished["secrets"] == [] and finished["secrets_error"] is False
+    assert finished["matched_salt_calls_256000"] == finished["matched_salt_calls_2"] == 0
     assert not (directory / "captured.json").exists()
 
 
