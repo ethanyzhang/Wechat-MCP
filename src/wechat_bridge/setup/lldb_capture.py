@@ -32,7 +32,7 @@ class PassphraseTally:
     """Count distinct 256000-round PBKDF inputs for one run, in memory only.
 
     A secret is never written or emitted. Distinct secrets are told apart by a
-    fingerprint: the first 4 bytes of HMAC-SHA256 keyed with a fresh random key
+    fingerprint: the first 8 bytes of HMAC-SHA256 keyed with a fresh random key
     that lives only in this object, so a fingerprint cannot be brute-forced
     offline and cannot be compared across runs. 2-round calls carry the derived
     page key, not a passphrase, and are not tallied here.
@@ -62,7 +62,7 @@ class PassphraseTally:
         salts = sorted({page[:16] for _, page in rows})
         out = []
         for secret, calls in sorted(self._calls.items(), key=lambda kv: -kv[1]):
-            fp = hmac.new(self._mac_key, secret, hashlib.sha256).hexdigest()[:8]
+            fp = hmac.new(self._mac_key, secret, hashlib.sha256).hexdigest()[:16]
             entry = {'fp': fp, 'calls': calls}
             opened, truncated = 0, False
             for salt in salts:
@@ -203,11 +203,16 @@ def main():
             if time.monotonic()-last_update>15:
                 emit('waiting',verified_databases=len(found),**counts)
                 last_update=time.monotonic()
-        # The parent kills the helper at 180 s; leave a margin and never let a diagnostic
+        # The parent kills the helper at 240 s (system.py); leave a margin and never let a diagnostic
         # failure or delay replace a finished capture whose keys are already saved.
-        try: secrets=tally.report(rows,budget=min(60,started+170-time.monotonic()))
-        except Exception: secrets=[]
-        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,**counts,**tally.rounds)
+        # The helper no longer needs the app: close it before the slow derivations.
+        if process.IsValid() and process.GetState() not in (lldb.eStateExited,lldb.eStateDetached,lldb.eStateInvalid):
+            process.Kill()
+            emit('owned_process_closed',pid=pid)
+        secrets_error=False
+        try: secrets=tally.report(rows,budget=min(60,started+225-time.monotonic()))
+        except Exception: secrets,secrets_error=[],True
+        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,**counts,**tally.rounds)
         if found:
             return 0
         return 4 if process_ended else 3

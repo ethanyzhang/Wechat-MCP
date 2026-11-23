@@ -88,7 +88,7 @@ class SystemBackend:
         command(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path)], timeout=60)
 
     def capture(self, plan):
-        """Run the LLDB helper against the copy with a 180 s ceiling.
+        """Run the LLDB helper against the copy with a 240 s ceiling (150 s capture loop plus the secret-tally report).
 
         Raises capture_timeout, capture_process_ended or capture_failed.
         """
@@ -103,7 +103,7 @@ class SystemBackend:
         with os.fdopen(fd, "wb") as log:
             child = subprocess.Popen(args, stdout=log, stderr=log, env=env, start_new_session=True)
             try:
-                code = child.wait(timeout=180)
+                code = child.wait(timeout=240)
             except (KeyboardInterrupt, subprocess.TimeoutExpired) as error:
                 child.send_signal(signal.SIGINT)
                 try: child.wait(timeout=15)

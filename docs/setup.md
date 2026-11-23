@@ -174,7 +174,7 @@ The helper's final `capture_finished` event also reports, for diagnosis only,
 `matched_salt_calls_256000` and `matched_salt_calls_2` (matched PBKDF calls by
 round count) and `secrets`: one entry per distinct 256000-round input with its
 call count and `databases_verified`, the number of databases it opens when
-derived with each database's salt. An entry is identified by `fp`, 8 hex
+derived with each database's salt. An entry is identified by `fp`, 16 hex
 characters of an HMAC keyed with a random per-run key that is never stored, so
 it cannot be reversed or compared across runs. A passphrase shared by several
 databases shows as one entry with `databases_verified` above 1. No secret or

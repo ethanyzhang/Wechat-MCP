@@ -49,7 +49,7 @@ def test_output_holds_no_secret_and_fingerprints_differ_between_runs(tmp_path):
     text = json.dumps(first)
     assert SHARED.decode() not in text and SHARED.hex() not in text
     assert set(first[0]) == {"fp", "calls", "databases_verified"}
-    assert len(first[0]["fp"]) == 8
+    assert len(first[0]["fp"]) == 16
     assert first[0]["fp"] != second[0]["fp"]
 
 
