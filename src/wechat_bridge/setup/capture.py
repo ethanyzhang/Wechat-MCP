@@ -110,6 +110,8 @@ def _scrub_captured(plan: SetupPlan) -> list:
     wait there. If the rewrite fails the whole file goes, since it is only a candidate copy.
     """
     path = plan.directory / "captured.json"
+    try: (plan.directory / "captured.new").unlink(missing_ok=True)   # a killed helper's temp file
+    except OSError: pass
     try:
         raw = read_private_json(path)
     except (BridgeError, OSError):

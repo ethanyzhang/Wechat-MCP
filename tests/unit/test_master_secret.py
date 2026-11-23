@@ -225,3 +225,15 @@ def test_rotated_id_with_the_same_salt_is_not_overridden_by_derivation(tmp_path)
     after, coverage = k.verify_with_master_secrets(inventory, manifest, stale, {account_id: PASSPHRASE}, cfg)
     assert after is manifest and coverage is stale
     assert not coverage.ready
+
+
+def test_a_killed_helpers_temp_file_is_removed_on_a_failed_capture(tmp_path):
+    from wechat_bridge.setup.capture import run_capture
+    from wechat_bridge.core.errors import BridgeError
+    plan, backend = setup_case(tmp_path, [PASSPHRASE])
+    def die_mid_write(p):
+        (p.directory / "captured.new").write_text(PASSPHRASE.hex())
+        raise BridgeError("capture_timeout")
+    backend.capture = die_mid_write
+    assert run_capture(plan, backend=backend).status == "capture_timeout"
+    assert not (plan.directory / "captured.new").exists()
