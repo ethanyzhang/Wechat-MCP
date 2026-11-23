@@ -492,7 +492,7 @@ class QueryRepository:
             if identity in seen:   # one message held in two content tables is one candidate; another shard's same local_id is not
                 continue
             seen.add(identity)
-            candidates.append((position, len(text), -created, table + ':' + format(row['local_id'], '020d'),
+            candidates.append((position, len(text), -created, table + ':' + format(row['local_id'], '020d') + ':' + str(row['local_type']),
                                username, table, row['local_id'], row['local_type'], row['create_time']))
         candidates.sort()
         if last:
