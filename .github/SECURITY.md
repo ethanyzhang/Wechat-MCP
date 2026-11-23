@@ -78,10 +78,12 @@ Trust boundaries and assumptions:
   media files come from other people. Parsers are bounded, pinned to the
   tested build's schema, and fail closed. The bridge never executes or
   interprets message text as instructions.
-- **The MCP client is semi-trusted.** The server exposes nine typed read-only
+- **The MCP client is semi-trusted.** The server exposes thirteen typed read-only
   tools over stdio, with annotated read-only semantics, bounded replies and
-  opaque authenticated cursors. It has no SQL, shell, send, network-listener or
-  arbitrary-path capability. The client and its model see whatever the client
+  opaque authenticated cursors. It has no SQL, shell, network-listener or
+  arbitrary-path capability. Only when started with `serve --enable-send` does
+  it add one non-read-only `send_message` tool (see
+  [docs/mcp.md](../docs/mcp.md#sending-optional-off-by-default)). The client and its model see whatever the client
   retrieves.
 - **Setup is a privileged, explicit step.** Key capture runs an ad-hoc-signed
   copy of the app under LLDB. It never re-signs the installed bundle, needs no

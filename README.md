@@ -5,9 +5,10 @@ sits on your Mac. You ask your assistant things like "find the message where
 Anna sent the invoice", and it reads your own chats and files straight from
 WeChat's databases on your Mac.
 
-It reads your history and does nothing else. It cannot send messages, cannot
-post anything to your account, and does not talk to any cloud service. Your
-messages stay on your Mac.
+It reads your history. By default it cannot send messages, cannot post anything
+to your account, and does not talk to any cloud service. Sending is a separate
+opt-in (`serve --enable-send`, off unless you turn it on). Your messages stay
+on your Mac.
 
 > **Status: experimental.** It works on WeChat 4.1.15 (builds 270102 and
 > 270135) on macOS 27 with an Apple silicon Mac. Other WeChat versions are
@@ -37,7 +38,7 @@ Install and set up Wechat-MCP on this Mac. It is a local, read-only bridge
 that lets you search my WeChat history. You are either Claude Code or Codex;
 use the matching commands below.
 
-Before you run anything, clone tag v0.1.2 with `git clone --branch v0.1.2
+Before you run anything, clone tag v0.2.0 with `git clone --branch v0.2.0
 https://github.com/xerlxzx/Wechat-MCP.git ~/Wechat-MCP` and read README.md, docs/setup.md and docs/mcp.md in it. Then
 work through these steps, and tell me the result of each one in one line.
 
@@ -107,7 +108,7 @@ The manual steps below do the same work. You type the commands into the
 ### 1. Download the project
 
 ```sh
-git clone --branch v0.1.2 https://github.com/xerlxzx/Wechat-MCP.git
+git clone --branch v0.2.0 https://github.com/xerlxzx/Wechat-MCP.git
 cd Wechat-MCP
 ```
 
@@ -276,8 +277,11 @@ chats.
 - **Everything runs on your Mac.** The program has no cloud connection and
   opens no network port. Your assistant talks to it through a local pipe.
 - **The bridge itself does not write to WeChat.** Day to day it opens WeChat's
-  databases read-only. It has no way to send, edit or delete a message, and no
-  command that runs shell or database queries for the assistant. The one-time
+  databases read-only. It cannot edit or delete a message, and has no command
+  that runs shell or database queries for the assistant. Sending exists only
+  when you start the server with `serve --enable-send`; without the flag the
+  `send_message` tool does not exist (see
+  [docs/mcp.md](docs/mcp.md#sending-optional-off-by-default)). The one-time
   setup is different: it runs a modified copy of WeChat, as described below.
 - **Your assistant sees what it retrieves.** Anything the assistant reads goes
   to the model behind it. A message could contain text that tries to give the

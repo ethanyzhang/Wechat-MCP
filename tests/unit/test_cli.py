@@ -61,6 +61,7 @@ def test_unexpected_exception_prints_redacted_internal_error(tmp_path, capsys, m
 
     def fail(*args, **kwargs):
         raise PermissionError(13, "denied", private)
+    monkeypatch.setattr("wechat_bridge.cli.create_config", lambda *args, **kwargs: object())
     monkeypatch.setattr("wechat_bridge.cli.discover", fail)
     assert main(["--state-dir", str(tmp_path / "state"), "discover"]) == 2
     captured = capsys.readouterr()

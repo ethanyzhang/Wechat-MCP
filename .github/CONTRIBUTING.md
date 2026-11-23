@@ -48,8 +48,10 @@ change should not add one. Match the style of the surrounding file by hand.
 A change that weakens one of these needs a discussion with the maintainers in
 an issue before you write code.
 
-1. **Read-only in production.** Source databases are never written. No sending,
-   UI automation, cloud endpoint, network listener, SQL, shell or
+1. **Read-only in production.** Source databases are never written. The only
+   write-side surface is the opt-in `send_message` tool behind
+   `serve --enable-send` (off by default, absent without the flag). No other
+   sending, UI automation, cloud endpoint, network listener, SQL, shell or
    arbitrary-path surface.
 2. **Private data stays private.** State lives outside the repository. Never
    commit, print or log keys, identity secrets, account identifiers, message
