@@ -8,12 +8,13 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 ### Changed
 
-- The archive moves to schema version 3 when a refresh that can read the source takes the import lock: older code refuses it, so a
-  still-running older server cannot publish a generation without Moments over it. A refresh in a process that cannot read the
-  WeChat folder now returns `source_unreadable` without touching the archive (no failed generation is recorded). Upgrade note:
-  restart or stop every older `wechat-bridge serve` process after upgrading (`pgrep -fl 'wechat-bridge.*serve'`); an older process
-  keeps holding the one watcher lock but its refreshes are refused (`unsupported_archive_schema`), so until it exits only an explicit
-  `archive-refresh` updates the archive. Rolling back to an older pin needs the archive rebuilt.
+- The archive moves to schema version 3 when a server or `archive-refresh` that can read the source holds the import lock (`serve`
+  retries this until it succeeds, also while an older server holds the watcher lock): older code refuses it, so a still-running older
+  server cannot publish a generation without Moments over it. A refresh in a process that cannot read the WeChat folder now returns
+  `source_unreadable` without touching the archive (no failed generation is recorded). Upgrade note: restart or stop every older
+  `wechat-bridge serve` process after upgrading (`pgrep -fl 'wechat-bridge.*serve'`); once the archive is at version 3 an older
+  process keeps holding the one watcher lock but its refreshes are refused (`unsupported_archive_schema`), so until it exits only an
+  explicit `archive-refresh` updates the archive. Rolling back to an older pin needs the archive rebuilt.
 
 ### Added
 

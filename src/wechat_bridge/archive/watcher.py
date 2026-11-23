@@ -7,7 +7,7 @@ import time
 from ..adapters.wechat_4_1 import ADAPTER_VERSION, open_adapter
 from ..core.config import check_private_fd
 from ..core.errors import BridgeError
-from .importer import refresh_archive
+from .importer import lock_out_older_servers, refresh_archive
 from .reconcile import source_fingerprint
 from .store import Archive
 
@@ -140,7 +140,9 @@ def run_exclusive(config, stop_event, *, retry_seconds=LOCK_RETRY_SECONDS, **kwa
 
     The flock dies with its process, so a crashed holder never leaves a stale lock.
     """
+    locked_out = False
     while not stop_event.is_set():
+        locked_out = locked_out or lock_out_older_servers(config)   # retried until it succeeds, also while an older watcher holds the lock
         try:
             fd = _try_watcher_lock(config)
         except (BridgeError, OSError):

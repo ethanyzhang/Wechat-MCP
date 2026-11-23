@@ -148,8 +148,8 @@ case "open":
     // Progress is the exposed rows' ids and positions: when three wheel steps change neither, the list has ended. The deadline
     // stays under the driver's timeout so the failure still reports its counts.
     func signature(_ rs: [AXUIElement]) -> String {
-        guard let f = rs.first, let l = rs.last else { return "" }
-        return ident(f) + "@\(Int(frameOf(f)?.minY ?? 0))|" + ident(l) + "@\(Int(frameOf(l)?.minY ?? 0))|\(rs.count)"
+        guard let f = rs.first else { return "" }
+        return rs.map { ident($0) }.joined(separator: "|") + "@\(Int(frameOf(f)?.minY ?? 0))"
     }
     let started = Date()
     var lastSignature = "", still = 0

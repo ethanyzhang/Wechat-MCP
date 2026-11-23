@@ -1,5 +1,6 @@
 """Moments: optional sns database import, field whitelist, failure isolation, archive migration and the three read tools."""
 import json
+import os
 import sqlite3
 
 import pytest
@@ -233,6 +234,28 @@ def test_the_version_lock_waits_for_a_refresh_in_flight(tmp_path):
         with pytest.raises(BridgeError, match='archive_refresh_in_progress'):
             importer.refresh_archive(cfg, adapter_factory=factory)
     assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 2
+
+
+def test_an_older_watcher_holding_the_watcher_lock_cannot_stop_the_lock_out(tmp_path):
+    import threading
+    from wechat_bridge.archive import importer, watcher
+    cfg = import_case(tmp_path)
+    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+    path = cfg.state_dir / 'archive.sqlite3'
+    sqlite3.connect(path).execute('PRAGMA user_version=2').connection.close()
+    holder = watcher._try_watcher_lock(cfg)   # stands for an older server that already runs the one watcher
+    assert holder is not None
+    stop = threading.Event()
+    thread = threading.Thread(target=watcher.run_exclusive, args=(cfg, stop), kwargs={'retry_seconds': 0.05})
+    thread.start()
+    try:
+        for _ in range(100):
+            if sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3:
+                break
+            stop.wait(0.05)
+        assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3
+    finally:
+        stop.set(); thread.join(5); os.close(holder)
 
 
 @pytest.mark.parametrize('code', ['source_symlink', 'source_inventory_limit'])

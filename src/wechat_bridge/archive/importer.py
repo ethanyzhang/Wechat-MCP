@@ -76,6 +76,20 @@ def _import_moments(archive, generation, adapter, cancel_event):
     return coverage | {'status': 'ok', 'moments': counts['moments'], 'notifications': counts['notifications']}
 
 
+def lock_out_older_servers(config):
+    """Best effort: move a version 2 archive to 3 so older servers can no longer refresh it. True once the archive no longer needs it.
+
+    Needs the import lock (so no older refresh is mid-import) and a readable source (so a lane process never does this), and does
+    not need the watcher lock: an older server that holds the watcher lock is exactly the one this stops."""
+    try:
+        with import_lock(config):
+            source_fingerprint(config)
+            Archive(config).lock_out_older_code()
+        return True
+    except (BridgeError, OSError):
+        return False
+
+
 def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
     """Import the source into a new generation and publish it only if every check passes.
 
