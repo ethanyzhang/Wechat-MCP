@@ -170,6 +170,16 @@ administrator password, sends messages or drives the UI. Candidate keys, the
 journal, the process identity and capture logs stay under the private state
 directory with mode 0600.
 
+The helper's final `capture_finished` event also reports, for diagnosis only,
+`matched_salt_calls_256000` and `matched_salt_calls_2` (matched PBKDF calls by
+round count) and `secrets`: one entry per distinct 256000-round input with its
+call count and `databases_verified`, the number of databases it opens when
+derived with each database's salt. An entry is identified by `fp`, 8 hex
+characters of an HMAC keyed with a random per-run key that is never stored, so
+it cannot be reversed or compared across runs. A passphrase shared by several
+databases shows as one entry with `databases_verified` above 1. No secret or
+key is emitted.
+
 The plan's concrete commands are:
 
 - `codesign --verify --deep --strict /Applications/WeChat.app`, then

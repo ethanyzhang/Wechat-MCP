@@ -8,7 +8,7 @@ if not LIBRARY.is_file():  # a Homebrew SQLCipher works too, as in core.config.D
 KEY = bytes(range(32))
 
 class Engine:
-    def __init__(self, path, key=KEY, *, readonly=False):
+    def __init__(self, path, key=KEY, *, readonly=False, passphrase=None):
         self.lib = C.CDLL(str(LIBRARY))
         self.lib.sqlite3_open_v2.argtypes = [C.c_char_p, C.POINTER(C.c_void_p), C.c_int, C.c_char_p]
         self.lib.sqlite3_key.argtypes = [C.c_void_p, C.c_void_p, C.c_int]
@@ -16,7 +16,7 @@ class Engine:
         self.lib.sqlite3_close.argtypes = [C.c_void_p]
         self.ptr = C.c_void_p()
         assert self.lib.sqlite3_open_v2(str(path).encode(), C.byref(self.ptr), 1 if readonly else 6, None) == 0
-        raw = ("x'" + key.hex() + "'").encode()
+        raw = passphrase if passphrase is not None else ("x'" + key.hex() + "'").encode()
         assert self.lib.sqlite3_key(self.ptr, raw, len(raw)) == 0
         self.run("PRAGMA cipher_compatibility=4")
 
@@ -42,9 +42,9 @@ class Engine:
     def __exit__(self, *args): self.close()
 
 
-def create_database(path, *, wal=True, key=KEY):
+def create_database(path, *, wal=True, key=KEY, passphrase=None):
     path.parent.mkdir(parents=True, exist_ok=True)
-    engine = Engine(path, key)
+    engine = Engine(path, key, passphrase=passphrase)
     if wal:
         engine.run("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
     engine.run("CREATE TABLE messages(id INTEGER PRIMARY KEY, text TEXT, payload BLOB)")
