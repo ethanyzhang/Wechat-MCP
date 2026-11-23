@@ -73,8 +73,8 @@ ATTACHMENT_TYPE_SQL = "((local_type & 4294967295) IN (3,49))"
 TEXT_INDEX_DB = "message/message_fts.db"
 TEXT_INDEX_TABLE = re.compile(r"message_fts_v4_[0-9]+_content")
 TEXT_INDEX_COLUMNS = {"id": "INTEGER", **{f"c{i}": "" for i in range(7)}}
-# Indexed text read per row, in characters: 200 rows x 8192 characters x 4 bytes stays inside the reader's 8 MiB result
-# limit. A match past this prefix of a longer message is not found.
+# Indexed text read per row in a page, in characters: 200 rows x 8192 characters x 4 bytes stays inside the reader's 8 MiB
+# result limit. A longer text is then read again on its own, whole.
 TEXT_INDEX_PREFIX = 8192
 MAX_UNREAD = 1_000_000
 
@@ -242,9 +242,12 @@ class Wechat41Adapter:
         except Exception:
             self.text_index_status = "failed:text_index_schema_unreadable"
             return
-        tables = tuple(sorted(t.name for t in schema.tables if TEXT_INDEX_TABLE.fullmatch(t.name) and t.has_rowid and t.has(TEXT_INDEX_COLUMNS)))
+        found = [t for t in schema.tables if TEXT_INDEX_TABLE.fullmatch(t.name)]
+        tables = tuple(sorted(t.name for t in found))
         names = schema.table("name2id")
-        if not tables or not names or not names.has({"username": "TEXT"}) or not names.has_rowid:
+        # Every content table must have the expected shape: searching only the readable ones would silently miss messages.
+        if (not found or any(not t.has_rowid or not t.has(TEXT_INDEX_COLUMNS) for t in found)
+                or not names or not names.has({"username": "TEXT"}) or not names.has_rowid):
             self.text_index_status = "unsupported_schema"
             return
         self._text_index = (db, entry, schema, tables)
@@ -267,8 +270,7 @@ class Wechat41Adapter:
                 cursor = rows[-1]["id"]
 
     def text_index_rows(self, *, sessions=None, senders=None, lower=None, upper=None, type_sql=None):
-        """Yield rows of WeChat's text index: text (its first TEXT_INDEX_PREFIX characters), local_id, sort_seq, raw type, session,
-        sender and create_time.
+        """Yield rows of WeChat's text index: whole text, local_id, sort_seq, raw type, session, sender and create_time.
 
         Filters are pushed into SQL: `sessions`/`senders` are text-index row IDs (an empty tuple yields nothing), `lower`/`upper`
         bound create_time in seconds, `type_sql` is one RAW_TYPE_SQL predicate written for the local_type column.
@@ -291,9 +293,13 @@ class Wechat41Adapter:
                 cursor = -1
                 while True:
                     with reader.transaction() as tx:
-                        rows = tx.query(f"SELECT id,substr(c0,1,{TEXT_INDEX_PREFIX}) AS text,c1 AS local_id,c2 AS sort_seq,c3 AS local_type,c4 AS session,c5 AS sender,c6 AS create_time FROM "
+                        rows = tx.query(f"SELECT id,substr(c0,1,{TEXT_INDEX_PREFIX}) AS text,length(c0) AS text_length,c1 AS local_id,c2 AS sort_seq,"
+                                        "c3 AS local_type,c4 AS session,c5 AS sender,c6 AS create_time FROM "
                                         + schema.quote_table(table) + " WHERE id>? AND " + " AND ".join(where) + " ORDER BY id LIMIT 200",
                                         (cursor, *params), max_rows=200)
+                        for row in rows:
+                            if row["text_length"] > TEXT_INDEX_PREFIX:
+                                row["text"] = tx.query("SELECT c0 FROM " + schema.quote_table(table) + " WHERE id=?", (row["id"],), max_rows=1)[0]["c0"]
                         self.observations[db.database_id] = now_utc()
                     yield from rows
                     if len(rows) < 200:

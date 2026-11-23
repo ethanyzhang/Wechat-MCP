@@ -210,8 +210,8 @@ class QueryRepository:
         def build():
             resources = {}
             for username, local_id, resource_id in adapter.resource_ids():
-                if resource_id is not None:
-                    resources.setdefault((username, local_id), []).append(str(resource_id))
+                # str(None) too: an info row without detail rows yields a diagnostic ref whose ID derives from 'None'.
+                resources.setdefault((username, local_id), []).append(str(resource_id))
             index = {}
             for schema, table in adapter.all_message_tables():
                 username = people['tables'].get(table)
@@ -400,12 +400,13 @@ class QueryRepository:
             if group['kind'] != 'group':
                 raise BridgeError('group_not_found')
             members = [plain(asdict(m)) for m in adapter.memberships(conversation_id)] if group['membership_status'] == 'recorded' else []
-            start = last[0] + 1 if last else 0
-            selected = members[start:start + limit + 1]
-            items = [public_record(r) for r in selected[:limit]]
+            # Keyset on the member's contact ID, so a member who leaves between pages never shifts the rest. Members without a
+            # contact come last, in source order (they have no stable key).
+            keyed = sorted(([0, m['contact_id'], 0] if m['contact_id'] else [1, '', i], m) for i, m in enumerate(members))
+            selected = [(k, m) for k, m in keyed if not last or k > last][:limit + 1]
+            items = [public_record(m) for _, m in selected[:limit]]
             self._budget(items)
-            token = encode_cursor(self._key, bound, [start + limit - 1]) if len(selected) > limit else None
-            return self._result(items, next_cursor=token, group=public_record(group))
+            return self._result(items, next_cursor=self._token(selected, limit, bound, lambda s: s[0]), group=public_record(group))
 
     # ---- messages --------------------------------------------------------------------------------------------
 
@@ -435,14 +436,21 @@ class QueryRepository:
                 conversation = people['conversation'].get(conversation_id)
                 if conversation is None:
                     raise BridgeError('conversation_not_found')
-            accept = lambda m: (type is None or m.type == type) and (sender_id is None or m.sender_id == sender_id)
-            if normalized is not None:
-                return self._search(adapter, people, normalized, conversation, sender_id, lower, upper, type, limit, last, bound, accept)
+            def accept(message):
+                if (type is not None and message.type != type) or (sender_id is not None and message.sender_id != sender_id):
+                    return False
+                if lower is None and upper is None:
+                    return True
+                # Checked on the decoded row too: a lagging text index can carry an older time than the message now has.
+                when = int(message.source_timestamp) if message.utc_timestamp is not None else None
+                return when is not None and (lower is None or when >= lower) and (upper is None or when <= upper)
             if conversation is not None:
                 tables = list(adapter.message_tables(conversation['source_username']))
                 if not tables:
                     return self._result([], local_history_status='no_local_message_table')
-            else:
+            if normalized is not None:
+                return self._search(adapter, people, normalized, conversation, sender_id, lower, upper, type, limit, last, bound, accept)
+            if conversation is None:
                 tables = [(s, t) for s, t in adapter.all_message_tables() if t in people['tables']]
             streams = []
             for schema, table in tables:
@@ -469,7 +477,7 @@ class QueryRepository:
         senders = None
         if sender_id is not None:
             senders = tuple(r for username, rowids in rows_of.items() if adapter.identities.contact_id(username) == sender_id for r in rowids)
-        candidates = []
+        candidates, seen = [], set()
         for row in adapter.text_index_rows(sessions=sessions, senders=senders, lower=lower, upper=upper, type_sql=RAW_TYPE_SQL.get(type)):
             username = names.get(row['session'])
             if username is None:
@@ -480,6 +488,9 @@ class QueryRepository:
                 continue
             created = row['create_time'] if type_of_int(row['create_time']) and MIN_TIME <= row['create_time'] <= MAX_TIME else NO_TIME
             table = table_of(username)
+            if (table, row['local_id']) in seen:   # one message held in two content tables is one candidate
+                continue
+            seen.add((table, row['local_id']))
             candidates.append((position, len(text), -created, table + ':' + format(row['local_id'], '020d'),
                                username, table, row['local_id'], row['local_type'], row['create_time']))
         candidates.sort()

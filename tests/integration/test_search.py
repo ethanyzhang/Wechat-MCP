@@ -194,3 +194,74 @@ def test_a_very_long_indexed_message_stays_inside_the_read_limit(tmp_path):
         writer.run(f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES{rows}")
     assert len(repo.search_messages('发票', limit=50)['items']) == 31
     assert len(long_text) > TEXT_INDEX_PREFIX
+
+
+def test_a_match_past_the_page_prefix_of_a_long_message_is_found(tmp_path):
+    from wechat_bridge.adapters.wechat_4_1 import TEXT_INDEX_PREFIX
+    cfg, repo = repo_case(tmp_path)
+    text = '长' * (TEXT_INDEX_PREFIX + 100) + ' 尾部关键词'
+    with Engine(cfg.account_root / 'db_storage/message/message_0.db') as writer:
+        writer.run(f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(50,950,1,1,1700000100,'{text}',0)")
+    hits = repo.search_messages('尾部关键词')['items']
+    assert len(hits) == 1 and '尾部关键词' in hits[0]['excerpt']
+
+
+def test_search_rechecks_time_on_the_decoded_row_when_the_index_lags(tmp_path):
+    from tests.support.live import sync_text_index
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    from wechat_bridge.search.repository import QueryRepository
+    cfg, _ = repo_case(tmp_path)
+    with Engine(cfg.account_root / 'db_storage/message/message_0.db') as writer:   # local_id 60 exists in one shard only
+        writer.run(f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(60,960,1,1,1700000000,'延迟索引',0)")
+    sync_text_index(cfg)   # the index now says 1700000000
+    with Engine(cfg.account_root / 'db_storage/message/message_0.db') as writer:
+        writer.run(f"UPDATE {TABLE} SET create_time=1800000000 WHERE local_id=60")
+    lagging = QueryRepository(cfg, adapter_factory=lambda c: open_adapter(c, build='270102'))   # no index sync
+    assert lagging.search_messages('延迟索引', start='2023-11-14T00:00:00Z', end='2023-11-15T00:00:00Z')['items'] == []
+    assert len(lagging.search_messages('延迟索引')['items']) == 1
+
+
+def test_one_message_in_two_index_tables_is_one_result(tmp_path):
+    from tests.support.live import sync_text_index
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    from wechat_bridge.search.repository import QueryRepository
+    cfg, _ = repo_case(tmp_path)
+    sync_text_index(cfg)
+    with Engine(cfg.account_root / 'db_storage/message/message_fts.db') as writer:
+        writer.run('INSERT INTO message_fts_v4_1_content(c0,c1,c2,c3,c4,c5,c6) SELECT c0,c1,c2,c3,c4,c5,c6 FROM message_fts_v4_0_content; '
+                   'INSERT INTO message_fts_v4_0_content(c0,c1,c2,c3,c4,c5,c6) SELECT c0,c1,c2,c3,c4,c5,c6 FROM message_fts_v4_1_content WHERE id NOT IN (SELECT id FROM message_fts_v4_0_content)')
+    repo = QueryRepository(cfg, adapter_factory=lambda c: open_adapter(c, build='270102'))
+    assert len(repo.search_messages('发票')['items']) == 1
+
+
+def test_a_malformed_index_table_makes_search_unavailable_not_partial(tmp_path):
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    cfg, repo = repo_case(tmp_path)
+    with Engine(cfg.account_root / 'db_storage/message/message_fts.db') as writer:
+        writer.run('CREATE TABLE message_fts_v4_2_content(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5)')   # no c6
+    assert open_adapter(cfg, build='270102').text_index_status == 'unsupported_schema'
+    with pytest.raises(BridgeError, match='text_index_unavailable'):
+        repo.search_messages('发票')
+
+
+def test_search_in_a_conversation_without_local_messages_says_so(tmp_path):
+    _, repo = repo_case(tmp_path)
+    direct = next(c for c in repo.list_conversations()['items'] if c['kind'] == 'direct')
+    result = repo.search_messages('发票', conversation_id=direct['conversation_id'])
+    assert result['items'] == [] and result['local_history_status'] == 'no_local_message_table'
+
+
+def test_a_member_leaving_between_pages_does_not_skip_the_rest(tmp_path):
+    cfg, repo = repo_case(tmp_path)
+    with Engine(cfg.account_root / 'db_storage/contact/contact.db') as writer:
+        writer.run("INSERT INTO contact(id,username,nick_name,remark) VALUES(4,'fictional-carol','Carol',''),(5,'fictional-dan','Dan','');"
+                   "INSERT INTO chatroom_member VALUES(10,4),(10,5)")
+    group = next(c for c in repo.list_conversations()['items'] if c['kind'] == 'group')
+    everyone = [m['contact_id'] for m in repo.get_group(group['conversation_id'])['items']]
+    first = repo.get_group(group['conversation_id'], limit=2)
+    shown = [m['contact_id'] for m in first['items']]
+    with Engine(cfg.account_root / 'db_storage/contact/contact.db') as writer:   # the first member shown leaves
+        gone = int(repo._people(factory(cfg))['contact'][shown[0]]['source']['local_id'])
+        writer.run(f"DELETE FROM chatroom_member WHERE member_id={gone}")
+    rest = repo.get_group(group['conversation_id'], limit=2, cursor=first['next_cursor'])
+    assert [m['contact_id'] for m in rest['items']] == everyone[2:4]

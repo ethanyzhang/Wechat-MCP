@@ -158,3 +158,17 @@ def test_restored_id_never_collides_or_rebinds_an_unrotated_row(tmp_path):
     assert rows["hardlink/hardlink.db"]["database_id"] == hardlink
     saved = {e.relative_path: e.database_id for e in load_manifest(cfg.state_dir / "keys.json").entries}
     assert saved == {e.relative_path: e.database_id for e in manifest.entries}
+
+
+def test_a_write_lock_during_verification_is_source_busy_not_a_key_problem(tmp_path, monkeypatch):
+    import pytest
+    from tests.support.live import import_case
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    from wechat_bridge.core.errors import BridgeError
+    from wechat_bridge.source import keys
+    cfg = import_case(tmp_path)
+    def busy(*args, **kwargs):
+        raise BridgeError('source_busy')
+    monkeypatch.setattr(keys, 'open_source', busy)
+    with pytest.raises(BridgeError, match='source_busy'):
+        open_adapter(cfg, build='270102')

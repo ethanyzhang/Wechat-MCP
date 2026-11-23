@@ -59,3 +59,16 @@ def test_duplicate_resource_records_report_conflict_in_adapter(tmp_path):
     fresh=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
     assert fresh.attachment_ref(refs[0].attachment_id).mapping_provenance=='conflicting'
     assert [i['attachment_id'] for i in fresh.list_attachments()['items']]==[refs[0].attachment_id]
+
+
+def test_a_resource_without_detail_rows_resolves_by_its_derived_id(tmp_path):
+    from wechat_bridge.adapters.wechat_4_1 import open_adapter
+    from wechat_bridge.search.repository import QueryRepository
+    cfg=account_case(tmp_path,changes={
+      'message/message_0.db':f"INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(1,123,{(6<<32)|49},1,1700000000,'<msg><appmsg><type>6</type><title>File</title></appmsg></msg>',0)",
+      'message/message_resource.db':f"INSERT INTO ChatName2Id(rowid,user_name) VALUES(1,'{CHAT}'); INSERT INTO MessageResourceInfo(message_id,chat_id,message_local_id,message_svr_id,message_local_type,message_create_time) VALUES(5,1,1,123,{(6<<32)|49},1700000000)"})
+    repo=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
+    listed=repo.list_attachments()['items']
+    assert len(listed)==1
+    fresh=QueryRepository(cfg,adapter_factory=lambda c: open_adapter(c,build='270102'))
+    assert fresh.attachment_ref(listed[0]['attachment_id']).attachment_id==listed[0]['attachment_id']

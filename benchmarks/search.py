@@ -63,7 +63,8 @@ def main():
             raise BridgeError('invalid_synthetic_size')
         from tests.support.schemas import account_case, TABLE
         from tests.support.encrypted import Engine
-        from tests.support.live import factory
+        from tests.support.live import sync_text_index
+        from wechat_bridge.adapters.wechat_4_1 import open_adapter
         with tempfile.TemporaryDirectory(prefix='wechat-synthetic-benchmark-') as folder:
             config = account_case(Path(folder).resolve())
             with Engine(config.account_root / 'db_storage/message/message_0.db') as writer:
@@ -72,7 +73,9 @@ def main():
                     values = ','.join(f"({n},{n},1,1,{1700000000+n},'发票 invoice 🐈 synthetic {n}',0)" for n in range(start, min(start + 500, args.synthetic_records + 1)))
                     writer.run(f'INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES' + values)
                 writer.run('COMMIT')
-            result = benchmark(config, samples=args.samples, corpus_scope='synthetic_fixture', adapter_factory=factory)
+            sync_text_index(config)   # once, before timing: WeChat maintains its own index outside queries
+            result = benchmark(config, samples=args.samples, corpus_scope='synthetic_fixture',
+                               adapter_factory=lambda cfg: open_adapter(cfg, build='270102'))
     print(json.dumps(result))
 
 
