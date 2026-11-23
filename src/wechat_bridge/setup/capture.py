@@ -6,7 +6,8 @@ import time
 from ..core.config import read_private_json, write_private_json
 from ..core.errors import BridgeError
 from ..source.discovery import discover
-from ..source.keys import KeyEntry, KeyManifest, verify_keys, publish_verified_manifest
+from ..source.keys import (KeyEntry, KeyManifest, verify_keys, publish_verified_manifest,
+                           confirm_master_secret, save_master_secret, SECRET_MAX_BYTES)
 from .prepare import SetupPlan, fingerprint, update_journal
 from .recovery import _recover_setup
 from .lock import setup_lock, check_active_plan
@@ -59,6 +60,7 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
             raise BridgeError("source_changed")
         keys = raw.get("keys")
         if not isinstance(keys, dict): raise BridgeError("invalid_capture_output")
+        secrets = _take_master_secrets(plan, raw)
         entries = []
         for db in current.databases:
             row = keys.get(db.relative_path)
@@ -74,6 +76,10 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         # Captured keys are candidates; only keys that open their database are published.
         coverage = verify_keys(current, manifest, plan.config)
         publish_verified_manifest(manifest, coverage, plan.config)
+        # Stored only after it opens at least two real databases; an unconfirmed one is dropped.
+        confirmed = confirm_master_secret(current, secrets, plan.config) if secrets else None
+        if confirmed is not None:
+            save_master_secret(plan.config, *confirmed)
         status = "verified" if coverage.ready else "partial_coverage"
         update_journal(plan, stage="keys_verified", coverage=coverage.public_dict())
     except KeyboardInterrupt:
@@ -91,3 +97,22 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         finally:
             recovered = _recover_setup(plan, backend=backend)
     return CaptureResult(status, candidate_path, recovered.status, recovered.key_copies_removed)
+
+
+def _take_master_secrets(plan: SetupPlan, raw: dict) -> list[bytes]:
+    """Return the captured master-secret candidates and rewrite captured.json without them.
+
+    captured.json is deleted only after a fully verified capture, so a secret must not wait
+    there for a partial one; from here it lives in memory until keys are verified.
+    """
+    rows = raw.get("master_secrets", [])
+    if not isinstance(rows, list): raise BridgeError("invalid_capture_output")
+    try:
+        secrets = [bytes.fromhex(row) for row in rows]
+    except (TypeError, ValueError):
+        raise BridgeError("invalid_capture_output") from None
+    if any(not 0 < len(secret) <= SECRET_MAX_BYTES for secret in secrets):
+        raise BridgeError("invalid_capture_output")
+    if "master_secrets" in raw:
+        write_private_json(plan.directory / "captured.json", {"keys": raw["keys"]})
+    return secrets

@@ -73,3 +73,13 @@ def test_two_round_calls_are_counted_but_never_fingerprinted():
     tally.observe(256000, SHARED)
     assert tally.rounds == {"matched_salt_calls_256000": 2, "matched_salt_calls_2": 1}
     assert [e["calls"] for e in tally.report([])] == [2]
+
+
+def test_only_secrets_opening_two_or_more_databases_are_handed_to_setup(tmp_path):
+    rows = rows_for(tmp_path, [SHARED, SHARED, b"lonely passphrase"])
+    tally = PassphraseTally()
+    tally.observe(256000, SHARED)
+    tally.observe(256000, b"lonely passphrase")
+    assert tally.shared_secrets() == []        # nothing before a report
+    tally.report(rows)
+    assert tally.shared_secrets() == [SHARED.hex()]
