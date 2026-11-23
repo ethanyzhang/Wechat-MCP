@@ -95,8 +95,8 @@ class MacDriver:
                            send_enabled=send if isinstance(send, bool) else None,
                            bubbles=tuple(b for b in state.get('bubbles', []) if isinstance(b, str)))
 
-    def set_composer(self, text: str) -> None:
-        self._call('set_composer', stdin=text)
+    def set_composer(self, name: str, kind: str, text: str) -> None:
+        self._call('set_composer', name, kind, stdin=text)
 
     def clear_composer(self, name: str, kind: str, text: str) -> None:
         self._call('clear_composer', name, kind, stdin=text)

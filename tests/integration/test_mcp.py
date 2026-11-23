@@ -130,7 +130,7 @@ def test_metadata_response_budget_and_unreadable_source_are_safe(tmp_path):
     (empty.state_dir / 'keys.json').unlink()
     async def scenario():
         async with Client(create_server(case.config, adapter_factory=factory)) as client:
-            response = await client.call_tool('list_contacts', {'limit': 2})
+            response = await client.call_tool('list_contacts', {'limit': 200})
             assert response.is_error and response.structured_content['error'] == 'content_too_large'
         async with Client(create_server(empty, adapter_factory=factory)) as client:
             status = await client.call_tool('status', {})

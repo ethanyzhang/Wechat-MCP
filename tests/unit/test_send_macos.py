@@ -35,7 +35,7 @@ def driver(tmp_path, replies, **kw):
 
 def test_compiles_once_and_passes_text_only_on_stdin_as_utf8(tmp_path):
     d, runner = driver(tmp_path, [{'ok': True}, {'ok': True}])
-    d.set_composer('你好 secret')
+    d.set_composer('小逸', 'direct', '你好 secret')
     d.click_send('小逸', 'direct', '你好 secret')
     assert [c[0][0] for c in runner.calls].count('swiftc') == 1
     first, second = runner.calls[1], runner.calls[2]

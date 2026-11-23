@@ -79,7 +79,7 @@ class Sender:
             raise BridgeError('refused_draft_present')
         baseline = state.bubbles
         try:
-            driver.set_composer(text)
+            driver.set_composer(name, kind, text)
             state = self._state()
             if not title_matches(state, name, kind) or state.composer_text != text or state.send_enabled is not True:
                 raise BridgeError('refused_composer_mismatch')

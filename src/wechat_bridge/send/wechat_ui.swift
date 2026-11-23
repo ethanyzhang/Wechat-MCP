@@ -1,7 +1,7 @@
 // WeChat window helper for the send path. One command per run; prints one JSON object. It runs as a child of
 // the bridge process, so Accessibility trust is the host app's (Claude.app). Never types a keystroke (the
 // input method garbles them); all writes are AX value sets and real mouse clicks. Commands:
-//   trusted | activate | state | open <name> | set_composer (text on stdin) | click_send
+//   trusted | activate | state | open <name> | set_composer <name> <direct|group> (text on stdin) | click_send <name> <direct|group> | clear_composer <name> <direct|group>
 import ApplicationServices
 import AppKit
 
@@ -171,8 +171,13 @@ case "open":
     }
     diag("row_not_visible")
 case "set_composer":
-    guard let w = window(), let c = findFresh(w, { ident($0) == "chat_input_field" }) else { fail("ui_unavailable") }
+    // set_composer <name> <direct|group>, text on stdin. Writes only if, in this same run, the named chat is open and the
+    // composer is still empty, so a chat switch or a draft typed since the last read is never overwritten.
+    guard CommandLine.arguments.count == 4, let w = window() else { fail("usage") }
+    let name = CommandLine.arguments[2], group = CommandLine.arguments[3] == "group"
     let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard let s = chatState(w), (s["title"] as? String) == name, (s["count_label"] is String) == group,
+          (s["composer_text"] as? String) == "", let c = findFresh(w, { ident($0) == "chat_input_field" }) else { fail("state_changed") }
     AXUIElementSetAttributeValue(c, kAXValueAttribute as CFString, text as CFString) == .success ? out(["ok": true]) : fail("ui_unavailable")
 case "click_send":
     // click_send <name> <direct|group>, text on stdin. Everything is re-verified in this same run, right before the click,

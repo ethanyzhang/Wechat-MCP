@@ -488,9 +488,10 @@ class QueryRepository:
                 continue
             created = row['create_time'] if type_of_int(row['create_time']) and MIN_TIME <= row['create_time'] <= MAX_TIME else NO_TIME
             table = table_of(username)
-            if (table, row['local_id']) in seen:   # one message held in two content tables is one candidate
+            identity = (table, row['local_id'], row['local_type'], row['create_time'])
+            if identity in seen:   # one message held in two content tables is one candidate; another shard's same local_id is not
                 continue
-            seen.add((table, row['local_id']))
+            seen.add(identity)
             candidates.append((position, len(text), -created, table + ':' + format(row['local_id'], '020d'),
                                username, table, row['local_id'], row['local_type'], row['create_time']))
         candidates.sort()

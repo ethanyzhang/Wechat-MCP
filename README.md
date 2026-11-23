@@ -11,7 +11,7 @@ opt-in (`serve --enable-send`, off unless you turn it on). Your messages stay
 on your Mac.
 
 > **Status: experimental.** It works on WeChat 4.1.15 (builds 270102 and
-> 270135) on macOS 27 with an Apple silicon Mac. Other WeChat versions are
+> 270135) and 4.2.0 (build 270390) on macOS 27 with an Apple silicon Mac. Other WeChat versions are
 > refused. See [Current capabilities](#current-capabilities).
 
 ## Requirements
@@ -19,7 +19,7 @@ on your Mac.
 | You need | How to check |
 | --- | --- |
 | A Mac with Apple silicon, running macOS 27 | Apple menu > About This Mac |
-| WeChat for Mac, version 4.1.15, signed in | Open WeChat; run `defaults read /Applications/WeChat.app/Contents/Info.plist CFBundleVersion` and look for `270102` or `270135` |
+| WeChat for Mac, version 4.1.15 or 4.2.0, signed in | Open WeChat; run `defaults read /Applications/WeChat.app/Contents/Info.plist CFBundleVersion` and look for `270102` or `270135` (4.1.15), or `270390` (4.2.0) |
 | Claude Code or Codex | `claude --version` or `codex --version` |
 | uv (installs and runs the Python code) | `uv --version`. To install: `brew install uv` |
 | Homebrew (a Mac package installer) | `brew --version`. Install from https://brew.sh |
@@ -46,7 +46,7 @@ work through these steps, and tell me the result of each one in one line.
    `uv sync --locked` inside the folder.
 2. Check: run `uv run wechat-bridge doctor`, then `uv run wechat-bridge discover`
    (it creates the configuration file that every later command needs).
-   Stop and tell me if the WeChat build is not 270102 or 270135, or if
+   Stop and tell me if the WeChat build is not 270102, 270135 or 270390, or if
    discover finds more than one account.
 3. Keys: run `uv run wechat-bridge verify-keys`. If it reports verified keys,
    skip step 4.
@@ -133,7 +133,7 @@ uv run wechat-bridge doctor
 ```
 
 You should see one line of text with `"sqlcipher_available": true` and
-`"wechat_build": "270102"` or `"270135"`.
+`"wechat_build": "270102"`, `"270135"` or `"270390"`.
 
 - `sqlcipher_available` is `false`: rerun `brew install sqlcipher`. If you
   installed it another way, see [Troubleshooting](#troubleshooting).

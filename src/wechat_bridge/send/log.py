@@ -87,10 +87,15 @@ class SendLog:
         rows = []
         for line in lines:
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
             except ValueError:
-                # Damaged history cannot be trusted to hide a recent attempt: refuse rather than skip it.
-                raise BridgeError('send_log_unavailable') from None
+                row = None
+            # Damaged history cannot be trusted to hide a recent attempt: refuse rather than skip it.
+            if not isinstance(row, dict) or (row.get('event') in ('attempt', 'refused') and not (
+                    isinstance(row.get('time'), (int, float)) and isinstance(row.get('conversation_id'), str)
+                    and (row['event'] == 'refused' or isinstance(row.get('text_hmac'), str)))):
+                raise BridgeError('send_log_unavailable')
+            rows.append(row)
         return rows
 
     def check_allowed(self, conversation_id: str, text: str) -> None:

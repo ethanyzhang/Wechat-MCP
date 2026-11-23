@@ -42,7 +42,8 @@ If you registered a client by hand with a JSON definition, delete the
 The directory holds your database keys, which unlock your WeChat history,
 and the identity secret. Versions that still had the archive also kept a
 searchable copy of your history there. Deleting the directory is the step that
-removes your data.
+removes your data, except the send log described under "Folders outside the
+state directory" below.
 
 ```sh
 rm -r "<state-dir>"
@@ -86,6 +87,11 @@ the directory and clean it up by hand.
   `scripts/build_sqlcipher.py`. Delete `~/.local/share/wechat-bridge`.
   Homebrew's `sqlcipher` lives elsewhere; `brew uninstall sqlcipher` removes it
   if nothing else needs it.
+- `~/Library/Application Support/WechatBridgeSend` exists only if you ran the
+  server with `--enable-send`. It holds the send log (timestamps, conversation
+  IDs and keyed digests of sent text). Delete it after stopping every bridge
+  process. If you granted Accessibility to the terminal or client for sending,
+  revoke it in System Settings, Privacy & Security.
 - The project folder, for example `~/Wechat-MCP` with its `.venv`. Delete it
   after step 1, because the registered command pointed into it.
 

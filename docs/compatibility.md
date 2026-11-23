@@ -10,7 +10,7 @@ differs.
 | Component | Version |
 | --- | --- |
 | macOS | 27.0, arm64 |
-| WeChat | 4.1.15, builds 270102 and 270135 |
+| WeChat | 4.1.15, builds 270102 and 270135; 4.2.0, build 270390 |
 | Python | 3.14.6 |
 | Native SQLCipher / SQLite | 4.19.0 community / 3.53.4 (checksum-verified source build) |
 | MCP SDK | `mcp==2.3.0` (pinned) |
@@ -19,9 +19,9 @@ differs.
 `select_adapter` (`src/wechat_bridge/adapters/wechat_4_1.py`) gates support in
 three steps:
 
-1. The installed app's `CFBundleShortVersionString` must be `4.1.15`, and its
-   `CFBundleVersion` must be in `SUPPORTED_BUILDS` (`270102`, `270135`).
-   Otherwise the adapter raises `unsupported_build`.
+1. The installed app's `CFBundleShortVersionString` and `CFBundleVersion` must be
+   a pair in `SUPPORTED_VERSIONS` (`4.1.15` with `270102` or `270135`; `4.2.0`
+   with `270390`). Otherwise the adapter raises `unsupported_build`.
 2. The required tables and columns must match the explicit mappings, and the
    rowid and primary-key identity constraints must hold. Otherwise the adapter
    raises `unsupported_schema`.

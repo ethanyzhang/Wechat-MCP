@@ -27,8 +27,10 @@ class Fake:
         self.calls.append('open'); self.title = self.open_title or name
     def state(self):
         return WindowState(self.title, self.count, self.composer, self.send_enabled if self.composer else False, tuple(self.bubbles))
-    def set_composer(self, text):
+    def set_composer(self, name, kind, text):
         self.calls.append('set:' + text)
+        if self.title != name or self.composer != '':
+            raise UiError('state_changed')
         if not self.set_ignored:
             self.composer = text
         if self.on_set: self.on_set(self)
@@ -227,9 +229,33 @@ def test_state_error_after_the_write_clears_the_composer(tmp_path):
     assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_ui_unavailable'
 
 
+def test_set_composer_refuses_when_chat_switched_or_draft_appeared_before_the_write(tmp_path):
+    driver = Fake()
+    orig_open = driver.open_chat
+    def open_then_type(name):
+        orig_open(name); driver.composer = 'half-typed draft'
+    driver.open_chat = open_then_type
+    sender, *_ = build(tmp_path, driver)
+    # state() read empty? no: the draft is already there, so the earlier draft check refuses; now race the write itself.
+    driver = Fake()
+    real_state = driver.state
+    reads = []
+    def state():
+        st = real_state()
+        reads.append(1)
+        if len(reads) == 1:
+            driver.composer = 'draft typed after the check'
+            return WindowState(st.title, st.count_label, '', st.send_enabled, st.bubbles)
+        return st
+    driver.state = state
+    sender, *_ = build(tmp_path, driver)
+    assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_state_changed'
+    assert driver.composer == 'draft typed after the check'
+
+
 def test_set_composer_failure_is_a_refusal(tmp_path):
     driver = Fake()
-    def boom(text): raise UiError('ui_unavailable')
+    def boom(name, kind, text): raise UiError('ui_unavailable')
     driver.set_composer = boom
     sender, *_ = build(tmp_path, driver)
     assert code(lambda: sender.send(CONV, 'Alice', 'hi')) == 'refused_ui_unavailable'
@@ -312,3 +338,12 @@ def test_a_record_is_never_glued_onto_an_unfinished_line(tmp_path):
     log.attempt(CONV, 'b')
     lines = log.path.read_text().splitlines()
     assert json.loads(lines[0])['event'] == 'attempt' and lines[1] == '{"half' and json.loads(lines[2])['event'] == 'attempt'
+
+
+@pytest.mark.parametrize('line', ['{"event": "attempt"}', '[1, 2]', '{"event": "refused", "time": "x", "conversation_id": "c"}'])
+def test_well_formed_but_incomplete_send_log_row_is_send_log_unavailable(tmp_path, line):
+    _, _, log, _ = build(tmp_path)
+    log.path.parent.mkdir(parents=True, exist_ok=True)
+    log.path.write_text(line + '\n')
+    log.path.chmod(0o600)
+    assert code(lambda: log.check_allowed(CONV, 'y')) == 'send_log_unavailable'

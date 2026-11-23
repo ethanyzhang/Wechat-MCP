@@ -96,3 +96,14 @@ def test_recent_sorted_conversations_page_by_activity_then_id(tmp_path):
         if not cursor:
             break
     assert seen == everything and len(everything) == 2
+
+
+def test_search_keeps_messages_in_different_shards_that_share_a_local_id(tmp_path):
+    from tests.support.live import sync_text_index
+    cfg, repo = repo_case(tmp_path)
+    for shard, when in (('message_0', 1700000000), ('message_1', 1700000500)):
+        with Engine(cfg.account_root / f'db_storage/message/{shard}.db') as writer:
+            writer.run(f"DELETE FROM {TABLE} WHERE local_id=7; INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES(7,{9000 + when % 7},1,1,{when},'发票 shared-id',0)")
+    sync_text_index(cfg)
+    items = [m for m in repo.search_messages('shared-id', limit=10)['items']]
+    assert sorted(m['utc_timestamp'] for m in items) == ['2023-11-14T22:13:20+00:00', '2023-11-14T22:21:40+00:00']

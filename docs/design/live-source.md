@@ -1,6 +1,6 @@
 # Design: query WeChat's databases live, remove the archive
 
-Status: proposal for review. Branch `ethan/live-source`, based on `ethan/combined` at `4b76b4a`.
+Status: implemented on branch `ethan/live-source`, based on `ethan/combined` at `4b76b4a`.
 
 ## Problem
 

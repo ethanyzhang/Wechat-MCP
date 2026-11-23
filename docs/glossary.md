@@ -8,7 +8,7 @@ reads its `db_storage` directory and its media folders, and never writes to it.
 See [data-flow.md](data-flow.md).
 
 **Adapter.** The code that interprets source rows for one WeChat build. The only
-adapter covers 4.1.15 builds 270102 and 270135. It turns rows into messages,
+adapter covers 4.1.15 builds 270102 and 270135 and 4.2.0 build 270390. It turns rows into messages,
 replies, contacts, groups and attachment references. See
 [architecture.md](architecture.md#packages).
 

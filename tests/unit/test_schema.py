@@ -133,3 +133,19 @@ def test_installed_build_gates_live_adapter(tmp_path, monkeypatch, build, ok):
     else:
         with pytest.raises(BridgeError, match="unsupported_build"):
             open_adapter(cfg)
+
+
+@pytest.mark.parametrize("version,build,ok", [("4.1.15", "270102", True), ("4.1.15", "270135", True), ("4.2.0", "270390", True),
+                                              ("4.1.15", "270390", False), ("4.2.0", "270102", False), ("4.3.0", "270390", False)])
+def test_installed_version_and_build_must_be_a_supported_pair(tmp_path, monkeypatch, version, build, ok):
+    import plistlib
+    from wechat_bridge.adapters import wechat_4_1
+    plist = tmp_path / "Info.plist"
+    plist.write_bytes(plistlib.dumps({"CFBundleShortVersionString": version, "CFBundleVersion": build}))
+    monkeypatch.setattr(wechat_4_1, "INFO_PLIST", plist)
+    cfg = account_case(tmp_path / "acct")
+    if ok:
+        assert wechat_4_1.open_adapter(cfg).build == build
+    else:
+        with pytest.raises(BridgeError, match="unsupported_build"):
+            wechat_4_1.open_adapter(cfg)
