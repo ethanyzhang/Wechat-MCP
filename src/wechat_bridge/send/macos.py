@@ -6,6 +6,7 @@ The helper runs as a child of the bridge, so the Accessibility grant belongs to 
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from .driver import PressUncertain, UiError, WindowState
 SOURCE = Path(__file__).with_name('wechat_ui.swift')
 OPEN_TIMEOUT = 120
 STEP_TIMEOUT = 20
+DIAG = re.compile(r'(?:(?:rows_now|rows_max|steps|at_end|list|front)=(?:\d+|true|false|True|False)(?: |$))+', re.ASCII)
 KNOWN_CODES = {'no_accessibility', 'wechat_not_running', 'wechat_not_frontmost', 'target_obscured', 'no_window', 'chat_pane_unavailable',
                'chat_not_in_list', 'row_not_visible', 'state_changed', 'send_control_not_found', 'ui_unavailable'}
 
@@ -66,8 +68,9 @@ class MacDriver:
             raise fail('ui_unavailable')
         if 'error' in reply:
             code = reply['error']
-            if isinstance(reply.get('diag'), str):   # counts and flags only, never names; stderr is the server log
-                print('wechat_ui ' + str(code)[:40] + ': ' + reply['diag'][:200], file=sys.stderr, flush=True)
+            diag = reply.get('diag')
+            if isinstance(diag, str) and DIAG.fullmatch(diag):   # counts and flags only, never names; stderr is the server log
+                print('wechat_ui ' + str(code)[:40] + ': ' + diag, file=sys.stderr, flush=True)
             raise UiError(code if code in KNOWN_CODES else 'ui_unavailable')
         return reply
 

@@ -33,8 +33,8 @@ class Archive:
     """SQLite archive of generations; readers see only the generation archive_state points to.
 
     The file is owner-only and opened with O_NOFOLLOW. Schema versions 0 to 3 are accepted; the Moments tables are
-    added to older archives on open (CREATE IF NOT EXISTS, same transaction) and a version 2 archive moves to 3, which
-    locks out older code that would publish generations without Moments.
+    added to older archives on open (CREATE IF NOT EXISTS, same transaction). A refresh moves version 2 to 3 under the import
+    lock (`lock_out_older_code`), which older code refuses.
     """
     def __init__(self, config: Config):
         self.config = config
@@ -55,8 +55,6 @@ class Archive:
                 self._create(db)
             else:
                 self._create_moment_tables(db)
-                if version == 2:
-                    db.execute('PRAGMA user_version=3')
 
     @contextmanager
     def connection(self, *, write=False):
@@ -112,6 +110,14 @@ class Archive:
         db.execute('CREATE INDEX IF NOT EXISTS moments_time ON moments(generation,time_sort,record_id)')
         db.execute('CREATE INDEX IF NOT EXISTS moments_author ON moments(generation,author_id,time_sort,record_id)')
         db.execute('CREATE INDEX IF NOT EXISTS moment_notifications_time ON moment_notifications(generation,time_sort,record_id)')
+
+    def lock_out_older_code(self) -> None:
+        """Move a version 2 archive to 3 so code older than Moments refuses to open it (and so cannot publish a generation
+        without Moments). Call only while holding the import lock: older code holds that lock for its whole refresh, so no
+        older refresh is in flight when this runs."""
+        with self.connection(write=True) as db:
+            if db.execute('PRAGMA user_version').fetchone()[0] == 2:
+                db.execute('PRAGMA user_version=3')
 
     def begin_generation(self, account_id: str) -> int:
         """Start a building generation and fail any interrupted one. Raises archive_account_mismatch."""

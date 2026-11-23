@@ -118,3 +118,7 @@ def test_open_failure_keeps_its_code_and_logs_only_the_counts_the_helper_reports
     with pytest.raises(UiError) as caught:
         d.open_chat('小逸')
     assert caught.value.code == 'row_not_visible'
+    d, _ = driver(tmp_path, [{'error': 'chat_not_in_list', 'diag': 'rows_now=9 小逸'}])   # anything but counts and flags is never logged
+    with pytest.raises(UiError):
+        d.open_chat('小逸')
+    assert capsys.readouterr().err == ''

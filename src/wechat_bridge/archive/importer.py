@@ -92,7 +92,8 @@ def refresh_archive(config, *, adapter_factory=open_adapter, cancel_event=None):
         except BridgeError as error:
             if error.code == 'source_unreadable':
                 return _public_status(archive.status()) | {'status': 'failed', 'error': error.code}
-            raise
+            # any other code is recorded by the fingerprint call inside the try below, as before
+        archive.lock_out_older_code()   # the lock is held, so no older refresh is mid-import; only a process that can read the source gets here
         registry_path = config.state_dir / 'inventory.json'
         registry = read_private_json(registry_path) if registry_path.exists() else None
         account_id = registry['account_id'] if registry else discover(config).account_id

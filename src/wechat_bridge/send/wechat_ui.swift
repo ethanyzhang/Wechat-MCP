@@ -116,11 +116,11 @@ case "open":
     let name = CommandLine.arguments[2]
     func list() -> AXUIElement? { findFresh(w) { ident($0) == "session_list" } }
     // Rows are direct children of the list, so look there instead of walking the whole window tree: with a long chat open
-    // the tree walk hits its node budget before it reaches a row. Names are compared in canonical Unicode form.
-    func canon(_ s: String) -> String { s.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines) }
-    let want = canon(name)
+    // the tree walk hits its node budget before it reaches a row. The name must match exactly (Swift String == is canonical
+    // Unicode equivalence; no trimming, so "A" never opens a row named "A "), like every title check that follows.
     func rows() -> [AXUIElement] { list().map { l in children(l).filter { ident($0).hasPrefix("session_item_") } } ?? [] }
-    func row() -> AXUIElement? { rows().first { canon(String(ident($0).dropFirst("session_item_".count))) == want } }
+    func matching(_ rs: [AXUIElement]) -> AXUIElement? { rs.first { String(ident($0).dropFirst("session_item_".count)) == name } }
+    func row() -> AXUIElement? { matching(rows()) }
     // Any starting tab: when the chat list is not showing, click the left-bar tab buttons (real clicks, relative to the
     // window's own frame) until it appears. A chat list with no chat selected counts as showing.
     if list() == nil, let wf = frameOf(w) {
@@ -145,13 +145,22 @@ case "open":
     var steps = 0, seen = 0, atEnd = false
     func diag(_ code: String) -> Never { out(["error": code, "diag": "rows_now=\(rows().count) rows_max=\(seen) steps=\(steps) at_end=\(atEnd) list=\(list() != nil) front=\(isFront())"]) }
     for _ in 0..<12 { scroll(30) }
-    var lastFirst = "", still = 0
-    while row() == nil && steps < 300 {
+    // Progress is the exposed rows' ids and positions: when three wheel steps change neither, the list has ended. The deadline
+    // stays under the driver's timeout so the failure still reports its counts.
+    func signature(_ rs: [AXUIElement]) -> String {
+        guard let f = rs.first, let l = rs.last else { return "" }
+        return ident(f) + "@\(Int(frameOf(f)?.minY ?? 0))|" + ident(l) + "@\(Int(frameOf(l)?.minY ?? 0))|\(rs.count)"
+    }
+    let started = Date()
+    var lastSignature = "", still = 0
+    while steps < 300 {
         let rs = rows(); seen = max(seen, rs.count)
-        let first = rs.first.map { ident($0) } ?? "", last = rs.last.map { ident($0) } ?? ""
-        still = (first + "|" + last == lastFirst) ? still + 1 : 0   // the exposed window stopped moving: end of the list
-        lastFirst = first + "|" + last
+        if matching(rs) != nil { break }
+        let sig = signature(rs)
+        still = sig == lastSignature ? still + 1 : 0
+        lastSignature = sig
         if still >= 3 { atEnd = true; break }
+        if Date().timeIntervalSince(started) > 90 { break }
         scroll(-4); steps += 1
     }
     guard row() != nil else { diag("chat_not_in_list") }

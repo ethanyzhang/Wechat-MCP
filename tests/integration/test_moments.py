@@ -212,16 +212,41 @@ def test_an_existing_archive_without_moments_tables_gains_them_when_opened(tmp_p
     assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
     path = cfg.state_dir / 'archive.sqlite3'
     db = sqlite3.connect(path)
-    db.executescript('DROP TABLE moments; DROP TABLE moment_notifications;')
+    db.executescript('DROP TABLE moments; DROP TABLE moment_notifications; PRAGMA user_version=2;')   # an archive as older code left it
     db.commit(); db.close()
-    version = sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0]
-    assert version in (2, 3)
-    Archive(cfg)   # opening migrates in place
+    Archive(cfg)   # opening adds the tables but does not change the version
     db = sqlite3.connect(path)
     assert {'moments', 'moment_notifications'} <= {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert db.execute('PRAGMA user_version').fetchone()[0] == 3   # version 2 moves to 3: older code can no longer open it
+    assert db.execute('PRAGMA user_version').fetchone()[0] == 2
     assert repository(cfg).list_moments()['items'] == []   # pre-feature generation: queryable, empty, no Moments coverage entry
     assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+    assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3   # a refresh locks out older code
+
+
+def test_the_version_lock_waits_for_a_refresh_in_flight(tmp_path):
+    from wechat_bridge.archive import importer
+    cfg = import_case(tmp_path)
+    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+    path = cfg.state_dir / 'archive.sqlite3'
+    sqlite3.connect(path).execute('PRAGMA user_version=2').connection.close()
+    with importer.import_lock(cfg):   # an older refresh holds this lock for its whole run
+        with pytest.raises(BridgeError, match='archive_refresh_in_progress'):
+            importer.refresh_archive(cfg, adapter_factory=factory)
+    assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 2
+
+
+@pytest.mark.parametrize('code', ['source_symlink', 'source_inventory_limit'])
+def test_other_fingerprint_errors_are_still_recorded_as_failed_generations(tmp_path, monkeypatch, code):
+    from wechat_bridge.archive import importer
+    from wechat_bridge.archive.store import Archive
+    cfg = import_case(tmp_path)
+    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
+    def broken(config):
+        raise BridgeError(code)
+    monkeypatch.setattr(importer, 'source_fingerprint', broken)
+    result = importer.refresh_archive(cfg, adapter_factory=factory)
+    assert (result['status'], result['error']) == ('failed', code)
+    assert Archive(cfg).status()['last_refresh_error'] == code
 
 
 def test_multibyte_content_is_bounded_by_bytes_not_characters(tmp_path):
