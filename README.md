@@ -38,8 +38,8 @@ Install and set up Wechat-MCP on this Mac. It is a local, read-only bridge
 that lets you search my WeChat history. You are either Claude Code or Codex;
 use the matching commands below.
 
-Before you run anything, clone tag v0.2.0 with `git clone --branch v0.2.0
-https://github.com/xerlxzx/Wechat-MCP.git ~/Wechat-MCP` and read README.md, docs/setup.md and docs/mcp.md in it. Then
+Before you run anything, clone main with `git clone
+https://github.com/ethanyzhang/Wechat-MCP.git ~/Wechat-MCP` and read README.md, docs/setup.md and docs/mcp.md in it. Then
 work through these steps, and tell me the result of each one in one line.
 
 1. Install: run `brew install sqlcipher` if sqlcipher is missing, then
@@ -108,7 +108,7 @@ The manual steps below do the same work. You type the commands into the
 ### 1. Download the project
 
 ```sh
-git clone --branch v0.2.0 https://github.com/xerlxzx/Wechat-MCP.git
+git clone https://github.com/ethanyzhang/Wechat-MCP.git
 cd Wechat-MCP
 ```
 
