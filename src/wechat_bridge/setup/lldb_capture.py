@@ -224,7 +224,7 @@ def main():
             # before storing it beside keys.json. captured.json is 0600 like the raw keys.
             try: private_json(args.out, {'keys':found,'master_secrets':shared})
             except OSError: pass
-        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,**counts,**tally.rounds)
+        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,master_secrets_handed_over=len(shared),**counts,**tally.rounds)
         if found:
             return 0
         return 4 if process_ended else 3

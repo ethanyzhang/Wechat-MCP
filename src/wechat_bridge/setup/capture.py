@@ -54,13 +54,15 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         if backend.is_running(plan.app_path):
             raise BridgeError("client_exit_required")
         backend.capture(plan)
+        # Strip any master secret from captured.json before anything can fail.
+        rows = _scrub_captured(plan)
         raw = read_private_json(plan.directory / "captured.json")
         current = discover(plan.config)
         if fingerprint(current) != plan.source_fingerprint:
             raise BridgeError("source_changed")
         keys = raw.get("keys")
         if not isinstance(keys, dict): raise BridgeError("invalid_capture_output")
-        secrets = _take_master_secrets(plan, raw)
+        secrets = _parse_master_secrets(rows)
         entries = []
         for db in current.databases:
             row = keys.get(db.relative_path)
@@ -89,6 +91,8 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
     except OSError:
         status = "setup_io_failed"
     finally:
+        # The helper may have written a secret before a later failure (timeout, kill): scrub every exit.
+        _scrub_captured(plan)
         # Recovery runs on every exit path so the copy never outlives the capture.
         try:
             update_journal(plan, capture_status=status)
@@ -99,20 +103,34 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
     return CaptureResult(status, candidate_path, recovered.status, recovered.key_copies_removed)
 
 
-def _take_master_secrets(plan: SetupPlan, raw: dict) -> list[bytes]:
-    """Return the captured master-secret candidates and rewrite captured.json without them.
+def _scrub_captured(plan: SetupPlan) -> list:
+    """Remove master_secrets from captured.json and return the removed rows (unvalidated).
 
-    captured.json is deleted only after a fully verified capture, so a secret must not wait
-    there for a partial one; from here it lives in memory until keys are verified.
+    captured.json is deleted only after a fully verified capture, so a secret must never
+    wait there. If the rewrite fails the whole file goes, since it is only a candidate copy.
     """
-    rows = raw.get("master_secrets", [])
-    if not isinstance(rows, list): raise BridgeError("invalid_capture_output")
+    path = plan.directory / "captured.json"
+    try:
+        raw = read_private_json(path)
+    except (BridgeError, OSError):
+        return []
+    if "master_secrets" not in raw:
+        return []
+    rows = raw["master_secrets"]
+    try:
+        write_private_json(path, {k: v for k, v in raw.items() if k != "master_secrets"})
+    except (BridgeError, OSError):
+        try: path.unlink()
+        except OSError: pass
+    return rows if isinstance(rows, list) else [None]
+
+
+def _parse_master_secrets(rows: list) -> list[bytes]:
+    """Hex rows to secrets; raises invalid_capture_output on anything malformed."""
     try:
         secrets = [bytes.fromhex(row) for row in rows]
     except (TypeError, ValueError):
         raise BridgeError("invalid_capture_output") from None
     if any(not 0 < len(secret) <= SECRET_MAX_BYTES for secret in secrets):
         raise BridgeError("invalid_capture_output")
-    if "master_secrets" in raw:
-        write_private_json(plan.directory / "captured.json", {"keys": raw["keys"]})
     return secrets

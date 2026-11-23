@@ -244,6 +244,13 @@ def verify_with_master_secrets(inventory: Inventory, manifest: KeyManifest, cove
         secret = secrets.get(db.account_id)
         if secret is not None and item.status in ("missing_key", "replaced", "key_or_format_mismatch"):
             entry = derive_entry(db, secret)
+            existing = merged.get(entry.identity)
+            if existing is not None:
+                # Same path and salt: the stored key already opens it, and a rotated ID stays
+                # unready until publication restores the key's ID, so derive nothing for it.
+                if item.status == "replaced":
+                    continue
+                entry = replace(entry, database_id=existing.database_id)
             merged[entry.identity] = entry
             derived = True
     if not derived:

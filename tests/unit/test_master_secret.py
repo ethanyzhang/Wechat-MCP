@@ -174,3 +174,54 @@ def test_malformed_candidates_fail_capture_without_storing(tmp_path):
     backend.master_secrets = ["zz"]
     assert run_capture(plan, backend=backend).status == "invalid_capture_output"
     assert k.load_master_secrets(plan.config) == {}
+
+
+def test_secret_is_scrubbed_when_a_later_step_fails(tmp_path):
+    from wechat_bridge.setup.capture import run_capture
+    plan, backend = setup_case(tmp_path, [PASSPHRASE])
+    backend.master_secrets = [PASSPHRASE.hex(), "zz"]      # one real secret beside a malformed row
+    assert run_capture(plan, backend=backend).status == "invalid_capture_output"
+    assert PASSPHRASE.hex().encode() not in (plan.directory / "captured.json").read_bytes()
+    assert k.load_master_secrets(plan.config) == {}
+
+
+def test_secret_is_scrubbed_when_the_capture_step_itself_fails_after_writing(tmp_path):
+    from wechat_bridge.setup.capture import run_capture
+    from wechat_bridge.core.errors import BridgeError
+    plan, backend = setup_case(tmp_path, [PASSPHRASE])
+    write = backend.capture
+    def write_then_time_out(p):
+        write(p)
+        raise BridgeError("capture_timeout")
+    backend.capture = write_then_time_out
+    assert run_capture(plan, backend=backend).status == "capture_timeout"
+    assert PASSPHRASE.hex().encode() not in (plan.directory / "captured.json").read_bytes()
+
+
+def test_secret_is_scrubbed_when_the_source_changed_mid_capture(tmp_path):
+    from wechat_bridge.setup.capture import run_capture
+    plan, backend = setup_case(tmp_path, [PASSPHRASE])
+    write = backend.capture
+    def write_then_rebuild(p):
+        write(p)
+        rebuild(p.config, "contact/contact.db")
+    backend.capture = write_then_rebuild
+    assert run_capture(plan, backend=backend).status == "source_changed"
+    assert PASSPHRASE.hex().encode() not in (plan.directory / "captured.json").read_bytes()
+    assert k.load_master_secrets(plan.config) == {}
+
+
+def test_rotated_id_with_the_same_salt_is_not_overridden_by_derivation(tmp_path):
+    from dataclasses import replace
+    cfg = account(tmp_path)
+    manifest = published_keys(cfg)
+    inventory = discover(cfg)
+    target = manifest.entries[0]
+    manifest = k.KeyManifest(tuple(replace(e, database_id="old-incarnation") if e is target else e
+                                   for e in manifest.entries))
+    stale = k.verify_keys(inventory, manifest, cfg)
+    assert "replaced" in stale.statuses()
+    account_id = inventory.databases[0].account_id
+    after, coverage = k.verify_with_master_secrets(inventory, manifest, stale, {account_id: PASSPHRASE}, cfg)
+    assert after is manifest and coverage is stale
+    assert not coverage.ready
