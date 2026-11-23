@@ -41,7 +41,7 @@ In scope:
   paths into logs, errors, diagnostics, tracked files or the wheel
 - Escapes from the MCP surface: arbitrary SQL, shell, path or network access,
   path traversal or symlink following in media resolution, bypass of size, count
-  or time bounds, cursor forgery or cross-generation confusion
+  or time bounds, or cursor forgery
 - State-directory permission, atomicity or symlink-handling flaws
 - Setup-lifecycle flaws that could terminate the wrong process, leave the
   installed app modified or unsigned, or leave a debugger attached
@@ -62,8 +62,11 @@ Out of scope:
 ## Threat model summary
 
 Assets: the per-database keys (`keys.json`), the identity secret
-(`identity.json`), the archive (`archive.sqlite3`), decoded media caches and
-setup and proof evidence, all in the private state directory.
+(`identity.json`), and setup and proof evidence, all in the private state
+directory, plus the in-memory caches of a running `serve` process, which hold
+contact and conversation records and source identifiers. Versions before the
+live-source change also kept a full copy of the history in `archive.sqlite3`;
+delete it if it is still there.
 
 Trust boundaries and assumptions:
 
@@ -110,8 +113,8 @@ tracks the open hardening items.
   from backups. Ordinary reads use `keys.json` in the directory root. This is
   finding H-1 in the [security review](../docs/security-review.md), partially
   resolved.
-- **State at rest is plaintext.** Keys, the identity secret and the archive
-  are readable by any process that runs as your user.
+- **State at rest is plaintext.** Keys and the identity secret are readable
+  by any process that runs as your user, and the keys open the history.
 - **Retrieved content carries no per-item trust marker.** A message can contain
   text that tries to steer your assistant. Run clients without write or network
   tools when you can (finding H-5).
@@ -123,7 +126,7 @@ tracks the open hardening items.
   or attach it to bug reports. Default location:
   `~/Library/Application Support/WechatBridge`.
 - Exclude the state directory from Time Machine and other backups.
-- Treat the archive and `keys.json` like the chat history itself. Use FileVault
+- Treat `keys.json` like the chat history itself. Use FileVault
   and a screen lock.
 - Register the MCP server with clients and models you trust with your
   messages, and review what a client does with retrieved content.
@@ -141,8 +144,8 @@ tracks the open hardening items.
 3. WeChat's databases own the database keys, and this tool cannot rotate them.
    Treat the chat history in the affected account as exposed, and review your
    account-security options with WeChat.
-4. If the identity secret leaked, delete `identity.json` and the archive to
-   change derived IDs. This changes every stable ID and invalidates cursors.
+4. If the identity secret leaked, delete `identity.json` to change derived
+   IDs. This changes every stable ID and invalidates cursors.
 5. If the material reached a repository, a history rewrite does not undo the
    exposure. Rotate what you can and tell the maintainer through a private
    security advisory so the exposure is documented.

@@ -29,10 +29,17 @@ Want to contribute? Read [.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md).
 | [glossary.md](glossary.md) | Terms used across the docs, each linked to its owning document |
 | [uninstall.md](uninstall.md) | Removing the MCP registration, state directory, app copy and backup exclusion |
 
+## Designs
+
+| Document | Subject |
+| --- | --- |
+| [design/live-source.md](design/live-source.md) | Querying WeChat's databases live and removing the private archive: measurements, caches, result envelope, cursors, migration |
+
 ## Reviews
 
 Point-in-time assessments of the codebase. Each describes the code as of its
-writing.
+writing; all three predate the live-source design, so their archive findings
+describe removed code.
 
 | Document | Subject |
 | --- | --- |

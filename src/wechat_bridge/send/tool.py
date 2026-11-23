@@ -21,8 +21,8 @@ log_directory = DEFAULT_DIR   # tests point this at a temporary directory
 def register_send(server, allowed_arguments, service, config, invoke, driver=None):
     """Add `send_message`. Annotated destructive and open-world so a client's own permission prompt appears on every call.
 
-    The archive is opened on the first call, inside the error boundary, so an unprepared archive never stops the server
-    (and its `status` tool) from starting.
+    The query repository is opened on the first call, inside the error boundary, so an unreadable source never stops the
+    server (and its `status` tool) from starting.
     """
     if driver is None:
         from .macos import MacDriver

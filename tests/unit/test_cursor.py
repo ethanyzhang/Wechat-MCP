@@ -8,17 +8,17 @@ import pytest
 KEY = b"k" * 32
 
 
-def forge(payload, key=KEY):
+def forge(payload, key=KEY, label=b"wechat-cursor-v2\0"):
     raw = json.dumps(payload, separators=(",", ":")).encode()
-    sig = hmac.digest(key, b"wechat-cursor-v1\0" + raw, "sha256")
+    sig = hmac.digest(key, label + raw, "sha256")
     return base64.urlsafe_b64encode(raw + sig).decode().rstrip("=")
 
 
-def test_cursor_roundtrips_generation_and_position():
+def test_cursor_roundtrips_its_position():
     from wechat_bridge.search.cursor import binding, decode_cursor, encode_cursor
     bound = binding("search", {"q": "发票"}, 10)
-    token = encode_cursor(KEY, 7, bound, [1.5, "id"])
-    assert decode_cursor(token, KEY, bound) == (7, [1.5, "id"])
+    token = encode_cursor(KEY, bound, [1.5, "id"])
+    assert decode_cursor(token, KEY, bound) == [1.5, "id"]
     assert "发票" not in base64.urlsafe_b64decode(token + "==").decode("latin-1")
 
 
@@ -42,7 +42,7 @@ def test_binding_changes_with_method_filters_and_limit():
 def test_tampered_or_malformed_tokens_are_invalid_cursor(mutate):
     from wechat_bridge.core.errors import BridgeError
     from wechat_bridge.search.cursor import decode_cursor, encode_cursor
-    token = encode_cursor(KEY, 1, "bound", [1])
+    token = encode_cursor(KEY, "bound", [1])
     with pytest.raises(BridgeError) as info:
         decode_cursor(mutate(token, "bound"), KEY, "bound")
     assert info.value.code == "invalid_cursor" and info.value.__cause__ is None
@@ -51,7 +51,7 @@ def test_tampered_or_malformed_tokens_are_invalid_cursor(mutate):
 def test_wrong_key_and_wrong_binding_are_rejected():
     from wechat_bridge.core.errors import BridgeError
     from wechat_bridge.search.cursor import decode_cursor, encode_cursor
-    token = encode_cursor(KEY, 1, "bound", [1])
+    token = encode_cursor(KEY, "bound", [1])
     with pytest.raises(BridgeError, match="invalid_cursor"):
         decode_cursor(token, b"z" * 32, "bound")
     with pytest.raises(BridgeError, match="invalid_cursor"):
@@ -59,14 +59,12 @@ def test_wrong_key_and_wrong_binding_are_rejected():
 
 
 @pytest.mark.parametrize("payload", [
-    {"v": 2, "g": 1, "b": "bound", "last": [1]},
-    {"v": 1, "g": 0, "b": "bound", "last": [1]},
-    {"v": 1, "g": True, "b": "bound", "last": [1]},
-    {"v": 1, "g": "1", "b": "bound", "last": [1]},
-    {"v": 1, "g": 1, "b": "bound", "last": []},
-    {"v": 1, "g": 1, "b": "bound", "last": [1, 2, 3, 4, 5]},
-    {"v": 1, "g": 1, "b": "bound", "last": "x"},
-    {"v": 1, "g": 1, "b": "bound"},
+    {"v": 1, "b": "bound", "last": [1]},
+    {"v": 3, "b": "bound", "last": [1]},
+    {"v": 2, "b": "bound", "last": []},
+    {"v": 2, "b": "bound", "last": [1, 2, 3, 4, 5]},
+    {"v": 2, "b": "bound", "last": "x"},
+    {"v": 2, "b": "bound"},
 ])
 def test_validly_signed_but_ill_shaped_payloads_are_rejected(payload):
     from wechat_bridge.core.errors import BridgeError
@@ -77,4 +75,11 @@ def test_validly_signed_but_ill_shaped_payloads_are_rejected(payload):
 
 def test_forge_helper_accepts_a_valid_payload():
     from wechat_bridge.search.cursor import decode_cursor
-    assert decode_cursor(forge({"v": 1, "g": 3, "b": "bound", "last": [1, 2, 3, 4]}), KEY, "bound") == (3, [1, 2, 3, 4])
+    assert decode_cursor(forge({"v": 2, "b": "bound", "last": [1, 2, 3, 4]}), KEY, "bound") == [1, 2, 3, 4]
+
+
+def test_a_generation_pinned_cursor_from_the_archive_era_is_rejected():
+    from wechat_bridge.core.errors import BridgeError
+    from wechat_bridge.search.cursor import decode_cursor
+    with pytest.raises(BridgeError, match="invalid_cursor"):
+        decode_cursor(forge({"v": 1, "g": 3, "b": "bound", "last": [1]}, label=b"wechat-cursor-v1\0"), KEY, "bound")

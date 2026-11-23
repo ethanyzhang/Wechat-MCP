@@ -13,7 +13,6 @@ differs.
 | WeChat | 4.1.15, builds 270102 and 270135 |
 | Python | 3.14.6 |
 | Native SQLCipher / SQLite | 4.19.0 community / 3.53.4 (checksum-verified source build) |
-| Archive SQLite | 3.53.3 (Python's bundled engine) |
 | MCP SDK | `mcp==2.3.0` (pinned) |
 | Image runtime | Pillow 12.3.0, cryptography 50.0.2 (locked) |
 
@@ -91,6 +90,36 @@ Measured against a live archive of roughly ten thousand messages:
 - Warm query p95 stayed under 100 ms.
 - Larger archives and sustained synchronization lag are unmeasured.
 
+### 22 November 2026 (build 270390, WeChat 4.2.0, live queries)
+
+The archive was removed; every tool now reads WeChat's databases at call time
+(see [design/live-source.md](design/live-source.md)). Measured on an account
+with 39,360 local messages in 136 message tables, 10,764 contacts, 344
+conversations and 9,083 Moments posts. "Cold" is the first call in a new
+process (empty in-memory caches); "warm" is the same call repeated.
+
+| Tool | Cold | Warm |
+| --- | --- | --- |
+| `status` | 639 ms | 38 ms |
+| `list_conversations` (recent) | 705 ms | 40 ms |
+| `list_contacts` (query) | 670 ms | 41 ms |
+| `get_group` | 1209 ms | 577 ms |
+| `search_messages` (one common character) | 928 ms | 296 ms |
+| `get_messages` | 652 ms | 48 ms |
+| `recent_messages` (three weeks) | 704 ms | 84 ms |
+| `get_context` | 861 ms | 76 ms |
+| `list_attachments` (no filter) | 973 ms | 118 ms |
+| `get_attachment` (reference lookup) | 891 ms | 50 ms |
+| `list_moments` | 1393 ms | 44 ms |
+| `list_moment_notifications` | 1475 ms | 42 ms |
+
+Parity with the last archive generation: paging through the three largest
+conversations (10,779, 6,992 and 3,126 messages) returned exactly the archived
+message IDs with no duplicates, and `search_messages` for one two-character
+Chinese query returned the same 24 messages. WeChat's text index held all 27,754
+text messages and 4,271 of 4,270 replies, and its newest entry matched the newest
+message to the second.
+
 Reproduce the query-latency numbers with the synthetic benchmark:
 
 ```sh
@@ -106,5 +135,6 @@ uv run python -m benchmarks.search --samples 200 --synthetic-records 10000
 - Some iPhone history is missing from Mac WeChat. The bridge mirrors the local
   Mac history and has no iPhone backup importer.
 - Key verification covers a schema read, not a full-page integrity scan.
-- Archive size and synchronization lag beyond the measurements above are
-  unmeasured.
+- Accounts much larger than the one measured on 22 November 2026 are
+  unmeasured; cold-cache latency grows with the number of contacts, message
+  rows and Moments posts.

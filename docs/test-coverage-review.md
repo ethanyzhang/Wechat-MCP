@@ -2,6 +2,8 @@
 
 > Point-in-time review of the code as of v0.1.1. Current policy lives in [.github/SECURITY.md](../.github/SECURITY.md) and [architecture.md](architecture.md).
 
+> This review was written against the archive design (a private `archive.sqlite3` with generations, an importer, a watcher and the bridge's own search index). [design/live-source.md](design/live-source.md) replaced that design, so findings about the archive describe code that has been removed.
+
 Reviewed after the `core/` regrouping. The baseline suite had 399 passing tests
 and 0 skips. This review added tests and exposed one real bug (see
 [Bugs found](#bugs-found)). The maintainers fixed that bug afterwards, and the

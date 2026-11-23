@@ -38,6 +38,12 @@ CREATE TABLE {TABLE}(local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type
 real_sender_id INTEGER, create_time INTEGER, message_content TEXT, compress_content TEXT,
 packed_info_data BLOB, WCDB_CT_message_content INTEGER);
 """,
+    # WeChat's own full-text index: only the plain content tables and name2id the bridge reads (tests/support/live.py fills them).
+    "message/message_fts.db": """
+CREATE TABLE name2id(username TEXT PRIMARY KEY);
+CREATE TABLE message_fts_v4_0_content(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5, c6);
+CREATE TABLE message_fts_v4_1_content(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5, c6);
+""",
     "message/message_resource.db": """
 CREATE TABLE ChatName2Id(user_name TEXT, update_time INTEGER);
 CREATE TABLE SenderName2Id(user_name TEXT, update_time INTEGER);

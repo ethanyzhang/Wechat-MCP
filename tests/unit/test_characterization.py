@@ -1,17 +1,12 @@
-"""Characterization tests pinning behavior that the behavior-preserving refactor touches.
-
-These assert what the code does today so later refactor commits cannot drift it.
-They are added in Commit 0 and pass against the unchanged code.
-"""
+"""Characterization tests pinning serializer, cursor-binding, availability and limit behavior."""
 import json
-import sqlite3
 
 import pytest
 
 from wechat_bridge.core.errors import BridgeError
 
 
-# --- Compact-JSON serializers are byte-identical (guards the shared-helper commit) ---
+# --- Compact-JSON serializers are byte-identical ---
 
 JSON_CORPUS = [
     {'b': 1, 'a': 2},                       # key order preserved (no sort_keys)
@@ -28,17 +23,17 @@ JSON_CORPUS = [
 
 @pytest.mark.parametrize('value', JSON_CORPUS)
 def test_compact_json_serializers_are_byte_identical(value):
-    from wechat_bridge.archive.store import encode
+    from wechat_bridge.core.serialize import compact_json
     from wechat_bridge.mcp.server import _json
     expected = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-    assert encode(value) == expected
+    assert compact_json(value) == expected
     assert _json(value) == expected
 
 
 def test_compact_json_serializers_reject_nan():
-    from wechat_bridge.archive.store import encode
+    from wechat_bridge.core.serialize import compact_json
     from wechat_bridge.mcp.server import _json
-    for serialize in (encode, _json):
+    for serialize in (compact_json, _json):
         with pytest.raises(ValueError):
             serialize(float('nan'))
 
@@ -51,40 +46,33 @@ def test_cursor_binding_is_order_insensitive_for_filters():
     assert binding('messages', {'a': 1, 'b': 2}, 50) == binding('messages', {'b': 2, 'a': 1}, 50)
 
 
-# --- Attachment availability: SQL and Python rules agree on the reachable domain ---
-
-def _sql_availability(record):
-    from wechat_bridge.search.repository import AVAILABILITY_SQL
-    db = sqlite3.connect(':memory:')
-    try:
-        return db.execute(f'SELECT {AVAILABILITY_SQL} FROM (SELECT json(?) AS data) r',
-                          (json.dumps(record),)).fetchone()[0]
-    finally:
-        db.close()
-
+# --- Attachment availability over the whole reachable domain ---
 
 @pytest.mark.parametrize('provenance', ['conflicting', 'resource_hardlink', 'resource_layout', 'explicit_resource', 'unsupported'])
 @pytest.mark.parametrize('relative_path', [None, 'msg/file/2023-11/test.bin'])
 @pytest.mark.parametrize('declared_local', [True, False, None])
 @pytest.mark.parametrize('file_identity', [None, [1, 2, 3, 4, 5]])
-def test_availability_sql_and_python_agree_on_reachable_records(provenance, relative_path, declared_local, file_identity):
+def test_availability_follows_the_mapping_rules(provenance, relative_path, declared_local, file_identity):
     from wechat_bridge.search.repository import attachment_availability
     record = {'mapping_provenance': provenance, 'relative_path': relative_path,
               'declared_local': declared_local, 'file_identity': file_identity}
-    assert _sql_availability(record) == attachment_availability(record)
+    if provenance == 'conflicting':
+        expected = 'identity_mismatch'
+    elif provenance == 'unsupported':
+        expected = 'unsupported_format'
+    elif relative_path is None or declared_local is False or file_identity is None:
+        expected = 'not_local'
+    else:
+        expected = 'local_unverified'
+    assert attachment_availability(record) == expected
 
 
-def test_availability_empty_path_divergence_is_pinned_not_merged():
-    # mapping.py only ever emits relative_path=None or a well-formed path, never ''.
-    # On the unreachable '' input the SQL ('relative_path IS NULL') and Python
-    # (falsy) rules diverge. The refactor documents this invariant instead of
-    # merging the rules; this test pins the current divergence so neither side is
-    # "cleaned up" without the other.
+def test_availability_treats_an_empty_path_as_not_local():
+    # mapping.py only ever emits relative_path=None or a well-formed path; '' is unreachable and stays not_local.
     from wechat_bridge.search.repository import attachment_availability
     record = {'mapping_provenance': 'resource_hardlink', 'relative_path': '',
               'declared_local': True, 'file_identity': [1, 2, 3, 4, 5]}
-    assert _sql_availability(record) == 'local_unverified'        # SQL: '' IS NOT NULL
-    assert attachment_availability(record) == 'not_local'         # Python: '' is falsy
+    assert attachment_availability(record) == 'not_local'
 
 
 # --- Strict integer limits keep their distinct error codes (guards require_int_range) ---

@@ -10,6 +10,7 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from tests.integration.test_mcp_service import service_case
+from tests.support.live import factory, import_case, sync_text_index
 from tests.support.images import png
 
 TOOLS = {'status', 'list_moments', 'get_moment', 'list_moment_notifications', 'list_conversations', 'list_contacts', 'get_group', 'search_messages',
@@ -70,7 +71,7 @@ def test_official_client_in_memory_exercises_all_tools_and_binary_resources(tmp_
     from wechat_bridge.mcp.server import create_server
     case, _ = service_case(tmp_path)
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             await exercise(client)
     asyncio.run(scenario())
 
@@ -79,7 +80,7 @@ def test_invalid_argument_values_are_normalized_without_echoing_input(tmp_path):
     from wechat_bridge.mcp.server import create_server
     case, _ = service_case(tmp_path)
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             for arguments in ({'query': 'x', 'limit': 201}, {'query': 'x', 'limit': True},
                               {'query': 'x', 'before': 1}, {'max_bytes': 0}):
                 tool = 'get_attachment' if 'max_bytes' in arguments else 'search_messages'
@@ -92,46 +93,58 @@ def test_invalid_argument_values_are_normalized_without_echoing_input(tmp_path):
     asyncio.run(scenario())
 
 
+def subprocess_environment(tmp_path):
+    """Environment for a real `serve` subprocess: this checkout first, and the fixture's WeChat build pinned."""
+    import plistlib
+    from pathlib import Path
+    plist = tmp_path / 'Info.plist'
+    plist.write_bytes(plistlib.dumps({'CFBundleShortVersionString': '4.1.15', 'CFBundleVersion': '270102'}))
+    site = str(Path(__file__).resolve().parents[1] / 'support' / 'stdio_site')
+    path = os.pathsep.join(p for p in (site, os.environ.get('PYTHONPATH', '')) if p)
+    return dict(os.environ, PYTHONPATH=path, WECHAT_BRIDGE_TEST_PLIST=str(plist))
+
+
 def test_real_stdio_subprocess_handshake_delivery_and_reconnect(tmp_path):
     case, _ = service_case(tmp_path)
+    sync_text_index(case.config)   # what WeChat itself keeps current; the subprocess reads it as is
     parameters = StdioServerParameters(command=sys.executable,
-        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve', '--no-watch'],
-        env=dict(os.environ))   # the subprocess must import this checkout, not another install on the default path
+        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve'],
+        env=subprocess_environment(tmp_path))
     async def scenario():
         async with asyncio.timeout(20):
             async with Client(stdio_client(parameters)) as client:
                 await exercise(client)
             async with Client(stdio_client(parameters)) as client:
                 assert len((await client.list_tools()).tools) == len(TOOLS)
-                assert (await client.call_tool('status', {})).structured_content['active_generation'] is not None
+                assert (await client.call_tool('status', {})).structured_content['ready_for_local_queries']
     asyncio.run(scenario())
 
 
-def test_metadata_response_budget_and_unprepared_archive_are_safe(tmp_path):
+def test_metadata_response_budget_and_unreadable_source_are_safe(tmp_path):
     from wechat_bridge.mcp.server import create_server
-    from wechat_bridge.archive.store import Archive
-    from tests.integration.test_importer import import_case
+    from tests.support.encrypted import Engine
     case, _ = service_case(tmp_path)
-    archive = Archive(case.config); generation = archive.begin_generation(archive.status()['account_id'])
-    archive.write_records(generation, 'contacts', [{'contact_id': 'contact_' + '0' * 64, 'display_name': 'x' * 600000}])
-    archive.publish(generation, {})
+    with Engine(case.config.account_root / 'db_storage/contact/contact.db') as writer:
+        writer.run("UPDATE contact SET nick_name=printf('%.*c', 600000, 'x') WHERE id=1")
     empty = import_case(tmp_path / 'empty')
+    (empty.state_dir / 'keys.json').unlink()
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
-            response = await client.call_tool('list_contacts', {'limit': 1})
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
+            response = await client.call_tool('list_contacts', {'limit': 2})
             assert response.is_error and response.structured_content['error'] == 'content_too_large'
-        async with Client(create_server(empty, watch=True)) as client:
+        async with Client(create_server(empty, adapter_factory=factory)) as client:
             status = await client.call_tool('status', {})
             assert status.structured_content['ready_for_local_queries'] is False
+            assert status.structured_content['source_error'] == 'setup_required'
             response = await client.call_tool('search_messages', {'query': 'anything'})
-            assert response.is_error
+            assert response.is_error and response.structured_content['error'] == 'setup_required'
     asyncio.run(scenario())
 
 
-def test_default_stdio_watcher_closes_cleanly_on_client_disconnect(tmp_path):
+def test_default_stdio_server_closes_cleanly_on_client_disconnect(tmp_path):
     case, _ = service_case(tmp_path)
     parameters = StdioServerParameters(command=sys.executable,
-        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve'])
+        args=['-m', 'wechat_bridge.cli', '--state-dir', str(case.config.state_dir), 'serve'], env=subprocess_environment(tmp_path))
     async def scenario():
         async with asyncio.timeout(12):
             async with Client(stdio_client(parameters)) as client:
@@ -142,13 +155,11 @@ def test_default_stdio_watcher_closes_cleanly_on_client_disconnect(tmp_path):
 def test_resource_failures_keep_safe_codes_without_traceback_or_private_path(tmp_path, monkeypatch, caplog):
     import errno
     from mcp.shared.exceptions import MCPError
-    from wechat_bridge.archive.importer import refresh_archive
     from wechat_bridge.mcp.server import create_server
-    from tests.integration.test_importer import factory
     import wechat_bridge.mcp.service as service_module
     case, _ = service_case(tmp_path)
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             listed = (await client.call_tool('list_attachments', {})).structured_content['items']
             file = next(a for a in listed if a['kind'] == 'file')
             image = next(a for a in listed if a['kind'] == 'image')
@@ -167,10 +178,8 @@ def test_resource_failures_keep_safe_codes_without_traceback_or_private_path(tmp
             (case.config.account_root / 'msg/file/2023-11/test.bin').unlink()
             with pytest.raises(MCPError, match='attachment_not_local'):
                 await client.read_resource(file_uri)
-            refresh_archive(case.config, adapter_factory=factory)
-            refresh_archive(case.config, adapter_factory=factory)
-            with pytest.raises(MCPError, match='cursor_expired'):
-                await client.read_resource(file_uri)
+            with pytest.raises(MCPError, match='invalid_id'):
+                await client.read_resource(file_uri.replace(file['attachment_id'], 'attachment_x'))
         assert private_path not in caplog.text
         assert 'Traceback' not in caplog.text
     asyncio.run(scenario())

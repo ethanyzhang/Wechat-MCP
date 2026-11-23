@@ -1,4 +1,4 @@
-"""The single compact JSON encoding used for archive storage and MCP text payloads.
+"""The single compact JSON encoding used for private state and MCP text payloads.
 
 Insertion order is preserved (no sort_keys) and non-ASCII is kept literally;
 NaN/Infinity are rejected. Cursor signing (search.cursor) deliberately uses

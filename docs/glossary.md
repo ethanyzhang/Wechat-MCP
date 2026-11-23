@@ -12,10 +12,6 @@ adapter covers 4.1.15 builds 270102 and 270135. It turns rows into messages,
 replies, contacts, groups and attachment references. See
 [architecture.md](architecture.md#packages).
 
-**Archive.** The private SQLite file `archive.sqlite3` in the state directory.
-It holds generations and the search index, and is separate from WeChat's
-databases. See [architecture.md](architecture.md#runtime-state).
-
 **Attachment ref.** A record that ties a message to a file or image resource,
 with a kind, a representation (original or thumbnail) and an availability. The
 bytes come from WeChat's media folders on request. See
@@ -27,21 +23,14 @@ bytes come from WeChat's media folders on request. See
 **Build.** WeChat's `CFBundleVersion` number, such as 270102. The adapter
 accepts only listed builds. See [compatibility.md](compatibility.md).
 
-**Coverage.** What the archive holds relative to the source: mapped message
-tables, missing tables, database count, and flags such as
-`complete_phone_history: false`. See [compatibility.md](compatibility.md).
+**Coverage.** What the `status` tool reports about the source: message table
+count, message tables no conversation maps to, conversations without local
+messages, database count, and flags such as `complete_phone_history: false`.
+See [mcp.md](mcp.md#tools).
 
-**Cursor.** An opaque, authenticated paging token bound to a method, filters,
-limit and pinned generation. See [mcp.md](mcp.md#paging).
-
-**Freshness / stale.** `archive-status` reports `stale: true` when no
-generation is active, the source files changed since publication, or the last
-refresh failed. See [troubleshooting.md](troubleshooting.md).
-
-**Generation.** One complete, immutable import of the source into the archive.
-A refresh publishes a new generation atomically or leaves the previous one
-active. The store keeps the current and previous complete generations. See
-[architecture.md](architecture.md#key-contracts).
+**Cursor.** An opaque, authenticated paging token bound to a method, filters
+and limit. It resumes from a keyset position in the live data, so rows written
+after the first page can appear later. See [mcp.md](mcp.md#paging).
 
 **Identity secret.** The 32-byte key in `identity.json` that derives every
 opaque ID. Deleting it changes all IDs and invalidates cursors. See
@@ -77,9 +66,6 @@ copy, the databases and the recovery state. See [setup.md](setup.md#procedure).
 samples against the source. The public report omits content and identifiers.
 See [architecture.md](architecture.md#key-contracts).
 
-**Reconcile.** A full, bounded scan of the source into a new generation. See
-[architecture.md](architecture.md#key-contracts).
-
 **Representation.** `original`, `thumbnail`, `source` or `decoded`. The server
 keeps the label with the bytes and never substitutes one for another. See
 [mcp.md](mcp.md#attachment-delivery).
@@ -88,17 +74,18 @@ keeps the label with the bytes and never substitutes one for another. See
 databases grows with the shard count. See
 [architecture.md](architecture.md#key-contracts).
 
-**State directory.** The private folder for keys, identity, archive, setup plans
-and locks. The default is `~/Library/Application Support/WechatBridge`. See
+**State directory.** The private folder for keys, identity, inventory, setup
+plans and locks. The default is `~/Library/Application Support/WechatBridge`. See
 [architecture.md](architecture.md#runtime-state).
+
+**Text index.** WeChat's own full-text index, `message/message_fts.db`. The
+bridge reads its plain-text content tables for `search_messages` and never
+queries the FTS5 tables themselves. Messages WeChat does not index, such as
+system messages, are not searchable. See [mcp.md](mcp.md#search).
 
 **Verified keys.** Saved keys that authenticated a schema read of their
 database. Ordinary reads use only these. Verification does not check every
 page. See [architecture.md](architecture.md#key-contracts).
-
-**Watcher.** The background thread in `serve` that polls database and WAL
-metadata and reconciles. One watcher runs per state directory. See
-[mcp.md](mcp.md#launching).
 
 **WAL / SHM.** SQLite's write-ahead log (`-wal`) and shared-memory index
 (`-shm`) beside a database. SQLite appends recent writes to the WAL before it folds them into the main file.

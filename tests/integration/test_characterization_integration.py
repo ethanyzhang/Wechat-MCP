@@ -1,14 +1,11 @@
-"""Integration characterization tests pinning public limits, schema bounds and the
-import-lock permission gate before the behavior-preserving refactor. Added in Commit 0.
-"""
+"""Integration characterization tests pinning public limits, schema bounds and source read batch bounds."""
 import asyncio
-import os
 
 import pytest
 
 from mcp import Client
 
-from tests.integration.test_importer import import_case, factory
+from tests.support.live import import_case, factory
 from tests.integration.test_mcp_service import service_case
 from wechat_bridge.core.errors import BridgeError
 
@@ -25,7 +22,7 @@ def test_tool_input_schema_bounds_are_pinned(tmp_path):
     case, _ = service_case(tmp_path)
 
     async def scenario():
-        async with Client(create_server(case.config, watch=False)) as client:
+        async with Client(create_server(case.config, adapter_factory=factory)) as client:
             return {t.name: t.input_schema for t in (await client.list_tools()).tools}
 
     schemas = asyncio.run(scenario())
@@ -44,19 +41,11 @@ def test_tool_input_schema_bounds_are_pinned(tmp_path):
     assert search['limit']['maximum'] == 200
 
 
-def test_import_lock_rejects_group_readable_lock_file(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
-    cfg = import_case(tmp_path)
-    assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    os.chmod(cfg.state_dir / '.archive-import.lock', 0o644)
-    with pytest.raises(BridgeError, match='private_permissions'):
-        refresh_archive(cfg, adapter_factory=factory)
-
-
 @pytest.mark.parametrize('bad', [True, 0, 201, 1.0])
-def test_adapter_message_batches_rejects_nonint_batch_size(tmp_path, bad):
+def test_adapter_message_keys_rejects_nonint_batch_size(tmp_path, bad):
     cfg = import_case(tmp_path)
     adapter = factory(cfg)
     group = next(c for c in adapter.conversations() if c.kind == 'group')
+    schema, table = next(iter(adapter.message_tables(group.source_username)))
     with pytest.raises(BridgeError, match='invalid_limit'):
-        list(adapter.message_batches(group.conversation_id, batch_size=bad))
+        list(adapter.message_keys(schema, table, batch_size=bad))

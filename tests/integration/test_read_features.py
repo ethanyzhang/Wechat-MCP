@@ -1,10 +1,10 @@
 """Unread and recency on conversations, cross-conversation time listing and display names in message results."""
 import hashlib
-import json
 
 import pytest
 
-from tests.integration.test_importer import import_case, factory, active_rows
+from tests.support.encrypted import Engine
+from tests.support.live import import_case, factory, repository
 from tests.support.schemas import TABLE
 from wechat_bridge.core.errors import BridgeError
 
@@ -33,12 +33,15 @@ VALUES(1,200,1,1,1700000300,'direct hello',0);
 
 
 def activity_case(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
-    from wechat_bridge.search.repository import QueryRepository
     cfg = import_case(tmp_path, extra={'session/session.db': SESSION, 'contact/contact.db': CONTACT,
                                        'message/message_0.db': ALICE_MESSAGE})
-    assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    return cfg, QueryRepository(cfg)
+    return cfg, repository(cfg)
+
+
+def full_conversations(cfg):
+    """Unredacted conversation records as the repository holds them (with source usernames and sort keys)."""
+    repo = repository(cfg)
+    return repo._people(factory(cfg))['conversations']
 
 
 def by_name(repo, **options):
@@ -50,9 +53,9 @@ def names(repo, **options):
     return [c['display_name'] for c in repo.list_conversations(**options)['items']]
 
 
-def test_import_records_unread_count_and_last_activity(tmp_path):
+def test_conversations_carry_unread_count_and_last_activity(tmp_path):
     cfg, _ = activity_case(tmp_path)
-    rows = {r['display_name'] or r['kind'] + r['conversation_id'][-4:]: r for r in active_rows(cfg, 'conversations')}
+    rows = {r['display_name'] or r['kind'] + r['conversation_id'][-4:]: r for r in full_conversations(cfg)}
     group = rows['Fictional group']
     assert (group['unread_count'], group['last_timestamp']) == (3, '2023-11-14T22:21:40+00:00')
     assert group['last_sort'] == 1700000500
@@ -64,10 +67,8 @@ def test_import_records_unread_count_and_last_activity(tmp_path):
 
 
 def test_old_session_schema_reports_unavailable_instead_of_guessing(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
     cfg = import_case(tmp_path)
-    assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    rows = active_rows(cfg, 'conversations')
+    rows = full_conversations(cfg)
     session_rows = [r for r in rows if r['sources'][0]['table'] == 'SessionTable']
     assert session_rows
     for row in session_rows:
@@ -117,11 +118,8 @@ def test_recent_sort_orders_by_activity_with_undated_last_and_pages_across_the_b
 
 
 def test_equal_activity_pages_by_record_id_without_skipping(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
-    from wechat_bridge.search.repository import QueryRepository
     cfg = import_case(tmp_path, extra={'session/session.db': SESSION.replace('1700000900', '1700000500')})
-    refresh_archive(cfg, adapter_factory=factory)
-    repo = QueryRepository(cfg)
+    repo = repository(cfg)
     full = [c['conversation_id'] for c in repo.list_conversations(sort='recent')['items']]
     paged, cursor = [], None
     while True:
@@ -213,70 +211,22 @@ def test_message_results_carry_display_names_everywhere(tmp_path):
 
 
 def test_long_display_names_are_cut_and_counted(tmp_path, monkeypatch):
-    from wechat_bridge.search import repository
+    from wechat_bridge.search import repository as module
     cfg, repo = activity_case(tmp_path)
-    from wechat_bridge.archive.store import Archive
-    with Archive(cfg).connection(write=True) as db:  # the long name belongs to the sender of one stored message
-        sender = db.execute("SELECT record_id FROM contacts WHERE json_extract(data,'$.nickname')=?", (LONG_NAME,)).fetchone()[0]
-        db.execute("UPDATE messages SET sender_id=?,data=json_set(data,'$.sender_id',?) WHERE text='direct hello'", (sender, sender))
+    with Engine(cfg.account_root / 'db_storage/message/message_0.db') as writer:   # bob, whose name is long, sends one message
+        writer.run(f"UPDATE {ALICE_TABLE} SET real_sender_id=2 WHERE local_id=1")
     item = next(m for m in repo.recent_messages('2023-11-14T00:00:00Z')['items'] if m['text'] == 'direct hello')
-    assert len(item['sender_display_name']) == repository.MAX_NAME_CHARACTERS
-    monkeypatch.setattr(repository, 'MAX_QUERY_BYTES', 2000)
+    assert len(item['sender_display_name']) == module.MAX_NAME_CHARACTERS
+    monkeypatch.setattr(module, 'MAX_QUERY_BYTES', 2000)
     with pytest.raises(BridgeError, match='content_too_large'):
         repo.recent_messages('2023-11-14T00:00:00Z')
 
 
-def test_huge_stored_names_are_cut_in_the_query(tmp_path):
-    from wechat_bridge.archive.store import Archive
-    from wechat_bridge.search import repository
+def test_huge_source_names_are_cut_in_message_results(tmp_path):
+    from wechat_bridge.search import repository as module
     cfg, repo = activity_case(tmp_path)
-    huge = 'x' * 60000
-    with Archive(cfg).connection(write=True) as db:
-        db.execute("UPDATE contacts SET data=json_set(data,'$.display_name',?)", (huge,))
-        db.execute("UPDATE conversations SET data=json_set(data,'$.display_name',?)", (huge,))
+    with Engine(cfg.account_root / 'db_storage/contact/contact.db') as writer:
+        writer.run("UPDATE contact SET nick_name=printf('%.*c', 60000, 'x')")
     items = repo.recent_messages('2023-11-14T00:00:00Z')['items']
-    assert items and all(len(m['sender_display_name'] or '') <= repository.MAX_NAME_CHARACTERS
-                         and len(m['conversation_display_name']) == repository.MAX_NAME_CHARACTERS for m in items)
-
-
-def test_timeline_without_a_conversation_uses_the_time_index(tmp_path):
-    from wechat_bridge.archive.store import Archive
-    cfg, _ = activity_case(tmp_path)
-    sql = ('EXPLAIN QUERY PLAN SELECT m.record_id,m.time_sort FROM messages m WHERE m.generation=? AND m.timestamp IS NOT NULL '
-           'AND m.time_sort>=? ORDER BY time_sort DESC,record_id DESC LIMIT 51')
-    with Archive(cfg).connection() as db:
-        plan = ' '.join(str(tuple(r)) for r in db.execute(sql, (1, 0)))
-    assert 'message_time' in plan and 'TEMP B-TREE' not in plan
-
-
-def test_ensure_index_adds_the_time_index_to_an_existing_archive(tmp_path):
-    from wechat_bridge.archive.store import Archive
-    from wechat_bridge.search.index import ensure_index
-    cfg, _ = activity_case(tmp_path)
-    archive = Archive(cfg)
-    with archive.connection(write=True) as db:
-        db.execute('DROP INDEX message_time')
-    ensure_index(archive)
-    with archive.connection() as db:
-        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='message_time'").fetchone()
-
-
-def test_archive_from_another_adapter_version_is_stale_and_the_watcher_refreshes_it(tmp_path):
-    from wechat_bridge.archive.importer import archive_status
-    from wechat_bridge.archive.store import Archive
-    from wechat_bridge.archive.watcher import ArchiveWatcher
-    cfg, _ = activity_case(tmp_path)
-    status = archive_status(cfg)
-    assert status['stale'] is False and status['adapter_outdated'] is False
-    assert ArchiveWatcher(cfg)._seen == Archive(cfg).status()['source_fingerprint']
-    with Archive(cfg).connection(write=True) as db:  # as imported by the previous adapter version: no adapter_version at all
-        row = db.execute('SELECT generation,metadata FROM generations WHERE state="complete"').fetchone()
-        metadata = json.loads(row['metadata']); metadata.pop('adapter_version')
-        db.execute('UPDATE generations SET metadata=? WHERE generation=?', (json.dumps(metadata), row['generation']))
-    outdated = archive_status(cfg)
-    assert outdated['stale'] is True and outdated['adapter_outdated'] is True
-    watcher = ArchiveWatcher(cfg, adapter_factory=factory, debounce_seconds=1.0)
-    assert watcher._seen is None
-    assert watcher.poll(now=0.0) is None            # pending starts at the first poll
-    assert watcher.poll(now=5.0)['status'] == 'complete'
-    assert archive_status(cfg)['stale'] is False
+    assert items and all(len(m['sender_display_name'] or '') <= module.MAX_NAME_CHARACTERS
+                         and len(m['conversation_display_name']) == module.MAX_NAME_CHARACTERS for m in items)

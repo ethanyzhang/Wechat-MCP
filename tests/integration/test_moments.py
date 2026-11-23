@@ -1,11 +1,9 @@
 """Moments: optional sns database import, field whitelist, failure isolation, archive migration and the three read tools."""
 import json
-import os
-import sqlite3
 
 import pytest
 
-from tests.integration.test_importer import import_case, factory, active_rows
+from tests.support.live import import_case, factory
 from wechat_bridge.core.errors import BridgeError
 
 SECRETS = ('SECRETKEY', 'TOKENXYZ', 'ENCKEY99', '1 Poi Street', '37.7749', '-122.4194', 'MD5HASH', 'https://cdn.example/')
@@ -72,27 +70,36 @@ CASE = {'sns/sns.db': SNS_SCHEMA}
 
 
 def imported(tmp_path, schema=SNS_SCHEMA):
-    from wechat_bridge.archive.importer import refresh_archive
     cfg = import_case(tmp_path, extra_schemas={'sns/sns.db': schema})
-    status = refresh_archive(cfg, adapter_factory=factory)
-    return cfg, status
+    return cfg, repository(cfg).source_status()
 
 
-def repository(cfg):
+def repository(cfg, adapter_factory=factory):
     from wechat_bridge.mcp.service import ToolService
-    return ToolService(cfg).queries
+    return ToolService(cfg, adapter_factory=adapter_factory).queries
 
 
-def test_import_records_posts_with_a_strict_whitelist_and_no_secret_anywhere(tmp_path):
+def active_rows(cfg, kind='moments'):
+    """Unredacted parsed records as the repository caches them."""
+    return repository(cfg)._moments(factory(cfg))[kind]
+
+
+def counts(cfg):
+    result = {}
+    for row in active_rows(cfg):
+        result[row['parse_status']] = result.get(row['parse_status'], 0) + 1
+    return result
+
+
+def test_parsed_posts_keep_a_strict_whitelist_and_no_secret_anywhere(tmp_path):
     cfg, status = imported(tmp_path)
-    assert status['status'] == 'complete' and status['coverage']['moments']['status'] == 'ok'
-    assert status['coverage']['moments']['moments'] == {'ok': 1, 'oversize': 1, 'malformed': 2, 'summary_only': 1}
-    assert status['counts']['moments'] == 5 and status['counts']['moment_notifications'] == 4
+    assert status['moments_status'] == 'available'
+    assert counts(cfg) == {'ok': 1, 'oversize': 1, 'malformed': 2, 'summary_only': 1}
+    assert len(active_rows(cfg, 'moment_notifications')) == 4
     stored = json.dumps(active_rows(cfg, 'moments') + active_rows(cfg, 'moment_notifications'), ensure_ascii=False)
     for secret in SECRETS + ('CLIENT-SECRET', 'secret-pack'):
         assert secret not in stored, secret
-    raw = (cfg.state_dir / 'archive.sqlite3').read_bytes()
-    assert not any(secret.encode() in raw for secret in SECRETS + ('CLIENT-SECRET',))
+    assert [p.name for p in cfg.state_dir.iterdir() if p.name.startswith('archive')] == []   # nothing is copied to disk
     main = next(m for m in active_rows(cfg, 'moments') if m['parse_status'] == 'ok')
     assert main['text'] == 'Hello 朋友圈 world' and main['utc_timestamp'] == '2023-11-14T22:21:40+00:00'
     assert main['media'] == [{'type': 2, 'width': 100, 'height': 200, 'size_bytes': 3000}] * 2 and main['media_count'] == 2
@@ -136,7 +143,7 @@ def test_list_moments_filters_pages_and_names(tmp_path):
     repo = repository(cfg)
     everything = repo.list_moments()
     times = [m['utc_timestamp'] for m in everything['items'] if m['utc_timestamp']]
-    assert times == sorted(times, reverse=True) and everything['items'][-1]['utc_timestamp'] is None and everything['coverage']['moments']['status'] == 'ok'
+    assert times == sorted(times, reverse=True) and everything['items'][-1]['utc_timestamp'] is None
     alice = next(c for c in repo.list_contacts()['items'] if 'Same name' == c['display_name'])
     first = repo.list_moments(limit=2)
     assert len(first['items']) == 2 and first['next_cursor']
@@ -174,14 +181,22 @@ def test_comments_and_likes_are_capped_to_the_newest_with_counts():
     assert moment.like_count == MAX_LIKES + 5 and len(moment.likes) == MAX_LIKES and moment.likes_truncated
 
 
+def group_messages(repo):
+    group = next(c for c in repo.list_conversations()['items'] if c['kind'] == 'group')
+    return repo.get_messages(group['conversation_id'])['items']
+
+
 def test_unsupported_sns_schema_never_blocks_messages(tmp_path):
     cfg, status = imported(tmp_path, SNS_SCHEMA.replace('content TEXT, pack_info_buf', 'body TEXT, pack_info_buf'))
-    assert status['status'] == 'complete' and status['counts']['messages'] == 3
-    assert status['coverage']['moments']['status'] == 'unsupported_schema' and status['counts']['moments'] == 0
+    assert status['moments_status'] == 'unsupported_schema'
+    repo = repository(cfg)
+    assert len(group_messages(repo)) == 3
+    for call in (repo.list_moments, repo.list_moment_notifications, lambda: repo.get_moment('moment_' + '0' * 64)):
+        with pytest.raises(BridgeError, match='moments_unavailable'):
+            call()
 
 
-def test_a_failure_after_some_moments_discards_the_sns_part_and_still_publishes(tmp_path, monkeypatch):
-    from wechat_bridge.archive.importer import refresh_archive
+def test_a_failed_sns_read_is_moments_unavailable_and_never_blocks_messages(tmp_path):
     cfg = import_case(tmp_path, extra_schemas={'sns/sns.db': SNS_SCHEMA})
     def broken(config):
         adapter = factory(config)
@@ -190,86 +205,18 @@ def test_a_failure_after_some_moments_discards_the_sns_part_and_still_publishes(
             yield
         adapter.moment_notifications = notifications
         return adapter
-    status = refresh_archive(cfg, adapter_factory=broken)
-    assert status['status'] == 'complete' and status['counts']['messages'] == 3
-    assert status['coverage']['moments']['status'] == 'failed:query_timeout'
-    assert status['counts']['moments'] == 0 and status['counts']['moment_notifications'] == 0 and active_rows(cfg, 'moments') == []
+    repo = repository(cfg, broken)
+    with pytest.raises(BridgeError, match='moments_unavailable'):
+        repo.list_moments()
+    assert len(group_messages(repo)) == 3
 
 
-def test_no_sns_database_reports_not_present_and_empty_lists(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
+def test_no_sns_database_is_reported_and_never_an_empty_list(tmp_path):
     cfg = import_case(tmp_path)
-    status = refresh_archive(cfg, adapter_factory=factory)
-    assert status['coverage']['moments']['status'] == 'not_present'
     repo = repository(cfg)
-    assert repo.list_moments()['items'] == [] and repo.list_moment_notifications()['items'] == []
-    assert repo.list_moments()['coverage']['moments']['status'] == 'not_present'
-
-
-def test_an_existing_archive_without_moments_tables_gains_them_when_opened(tmp_path):
-    from wechat_bridge.archive.importer import refresh_archive
-    from wechat_bridge.archive.store import Archive
-    cfg = import_case(tmp_path)
-    assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    path = cfg.state_dir / 'archive.sqlite3'
-    db = sqlite3.connect(path)
-    db.executescript('DROP TABLE moments; DROP TABLE moment_notifications; PRAGMA user_version=2;')   # an archive as older code left it
-    db.commit(); db.close()
-    Archive(cfg)   # opening adds the tables but does not change the version
-    db = sqlite3.connect(path)
-    assert {'moments', 'moment_notifications'} <= {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert db.execute('PRAGMA user_version').fetchone()[0] == 2
-    assert repository(cfg).list_moments()['items'] == []   # pre-feature generation: queryable, empty, no Moments coverage entry
-    assert refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3   # a refresh locks out older code
-
-
-def test_the_version_lock_waits_for_a_refresh_in_flight(tmp_path):
-    from wechat_bridge.archive import importer
-    cfg = import_case(tmp_path)
-    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    path = cfg.state_dir / 'archive.sqlite3'
-    sqlite3.connect(path).execute('PRAGMA user_version=2').connection.close()
-    with importer.import_lock(cfg):   # an older refresh holds this lock for its whole run
-        with pytest.raises(BridgeError, match='archive_refresh_in_progress'):
-            importer.refresh_archive(cfg, adapter_factory=factory)
-    assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 2
-
-
-def test_an_older_watcher_holding_the_watcher_lock_cannot_stop_the_lock_out(tmp_path):
-    import threading
-    from wechat_bridge.archive import importer, watcher
-    cfg = import_case(tmp_path)
-    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    path = cfg.state_dir / 'archive.sqlite3'
-    sqlite3.connect(path).execute('PRAGMA user_version=2').connection.close()
-    holder = watcher._try_watcher_lock(cfg)   # stands for an older server that already runs the one watcher
-    assert holder is not None
-    stop = threading.Event()
-    thread = threading.Thread(target=watcher.run_exclusive, args=(cfg, stop), kwargs={'retry_seconds': 0.05})
-    thread.start()
-    try:
-        for _ in range(100):
-            if sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3:
-                break
-            stop.wait(0.05)
-        assert sqlite3.connect(path).execute('PRAGMA user_version').fetchone()[0] == 3
-    finally:
-        stop.set(); thread.join(5); os.close(holder)
-
-
-@pytest.mark.parametrize('code', ['source_symlink', 'source_inventory_limit'])
-def test_other_fingerprint_errors_are_still_recorded_as_failed_generations(tmp_path, monkeypatch, code):
-    from wechat_bridge.archive import importer
-    from wechat_bridge.archive.store import Archive
-    cfg = import_case(tmp_path)
-    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    def broken(config):
-        raise BridgeError(code)
-    monkeypatch.setattr(importer, 'source_fingerprint', broken)
-    result = importer.refresh_archive(cfg, adapter_factory=factory)
-    assert (result['status'], result['error']) == ('failed', code)
-    assert Archive(cfg).status()['last_refresh_error'] == code
+    assert repo.source_status()['moments_status'] == 'not_present'
+    with pytest.raises(BridgeError, match='moments_unavailable'):
+        repo.list_moments()
 
 
 def test_multibyte_content_is_bounded_by_bytes_not_characters(tmp_path):
@@ -279,8 +226,8 @@ def test_multibyte_content_is_bounded_by_bytes_not_characters(tmp_path):
     schema = SNS_SCHEMA + f"INSERT INTO SnsTimeLine VALUES(2001,'{ALICE}','{sql_text(heavy)}',NULL);" + ''.join(
         f"INSERT INTO SnsTimeLine VALUES({2100 + i},'{BOB}','{sql_text(post(2100 + i, BOB, '汉' * 80000))}',NULL);" for i in range(30))
     cfg, status = imported(tmp_path, schema)
-    assert status['coverage']['moments']['status'] == 'ok'   # many heavy rows never exceed the reader budget
-    assert status['coverage']['moments']['moments']['oversize'] == 2   # the original oversize row and the multibyte one
+    assert status['moments_status'] == 'available'   # many heavy rows never exceed the reader budget
+    assert counts(cfg)['oversize'] == 2   # the original oversize row and the multibyte one
 
 
 def test_structure_time_truncation_nickname_and_unknown_delete_flags(tmp_path):
@@ -332,44 +279,3 @@ def test_list_moments_trims_embedded_lists_but_get_moment_returns_them_all(tmp_p
     assert len(listed['likes']) == 10 and listed['likes_truncated'] and listed['like_count'] == 20
     full = repo.get_moment(listed['moment_id'])['moment']
     assert len(full['comments']) == 12 and len(full['likes']) == 20 and not full['comments_truncated']
-
-
-def test_cancellation_is_checked_while_the_feed_is_scanned_and_a_failed_discard_is_not_published(tmp_path, monkeypatch):
-    import threading
-    from wechat_bridge.archive.importer import refresh_archive
-    from wechat_bridge.archive.store import Archive
-    cfg = import_case(tmp_path, extra_schemas={'sns/sns.db': SNS_SCHEMA})
-    cancel = threading.Event(); cancel.set()
-    status = refresh_archive(cfg, adapter_factory=factory, cancel_event=cancel)
-    assert status['status'] == 'failed' and status['error'] == 'operation_cancelled'
-    def broken(config):
-        adapter = factory(config)
-        def notifications(checkpoint=None):
-            raise BridgeError('query_timeout')
-            yield
-        adapter.moment_notifications = notifications
-        return adapter
-    def failing(self, generation, kinds):
-        raise BridgeError('archive_write_failed')
-    monkeypatch.setattr(Archive, 'discard', failing)
-    status = refresh_archive(cfg, adapter_factory=broken)
-    assert status['status'] == 'failed' and status['error'] == 'moments_discard_failed'
-
-
-def test_a_process_that_cannot_read_the_source_leaves_the_archive_untouched(tmp_path, monkeypatch):
-    from wechat_bridge.archive import importer
-    from wechat_bridge.archive.store import Archive
-    from wechat_bridge.core.errors import BridgeError
-    cfg = import_case(tmp_path)
-    assert importer.refresh_archive(cfg, adapter_factory=factory)['status'] == 'complete'
-    before = Archive(cfg).status()
-    generations = sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('SELECT count(*) FROM generations').fetchone()[0]
-    def unreadable(config):
-        raise BridgeError('source_unreadable')
-    monkeypatch.setattr(importer, 'source_fingerprint', unreadable)
-    result = importer.refresh_archive(cfg, adapter_factory=factory)
-    assert (result['status'], result['error']) == ('failed', 'source_unreadable')
-    after = Archive(cfg).status()
-    assert after['active_generation'] == before['active_generation'] and after['last_refresh_error'] == before['last_refresh_error']
-    assert sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('SELECT count(*) FROM generations').fetchone()[0] == generations
-    assert sqlite3.connect(cfg.state_dir / 'archive.sqlite3').execute('PRAGMA user_version').fetchone()[0] == 3

@@ -1,1 +1,1 @@
-"""Bounded literal retrieval from completed local archive generations."""
+"""Bounded live retrieval from WeChat's local databases."""

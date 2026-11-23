@@ -1,4 +1,4 @@
-"""Warm archive-query timings. Stdout contains aggregate metrics only."""
+"""Warm live-query timings against WeChat's databases. Stdout contains aggregate metrics only."""
 import argparse
 import math
 import os
@@ -10,18 +10,22 @@ import tempfile
 import time
 import json
 
-from wechat_bridge.archive.store import Archive
 from wechat_bridge.core.config import load_config
 from wechat_bridge.core.errors import BridgeError
-from wechat_bridge.search.repository import QueryRepository
+from wechat_bridge.search.repository import QueryRepository, table_of
 
 
-def benchmark(config, *, samples=200, corpus_scope='live_observed', import_seconds=None):
+def benchmark(config, *, samples=200, corpus_scope='live_observed', adapter_factory=None):
     if type(samples) is not int or not 200 <= samples <= 10000:
         raise BridgeError('invalid_benchmark_samples')
-    repo = QueryRepository(config); archive = Archive(config)
-    with archive.connection() as db:
-        conversation = db.execute('SELECT conversation_id FROM messages WHERE generation=(SELECT active_generation FROM archive_state) GROUP BY conversation_id ORDER BY count(*) DESC LIMIT 1').fetchone()
+    repo = QueryRepository(config, adapter_factory=adapter_factory)
+    adapter = repo._factory(config)
+    sizes = {}
+    for schema, table in adapter.all_message_tables():
+        sizes[table] = sizes.get(table, 0) + sum(1 for _ in adapter.local_ids(schema, table))
+    ranked = sorted(((sizes[table_of(c['source_username'])], c['conversation_id']) for c in repo._people(adapter)['conversations']
+                     if table_of(c['source_username']) in sizes), reverse=True)
+    conversation = (ranked[0][1],) if ranked else None
     calls = [('short_chinese', lambda: repo.search_messages('发票')),
              ('latin', lambda: repo.search_messages('invoice')),
              ('emoji', lambda: repo.search_messages('🐈')),
@@ -36,17 +40,15 @@ def benchmark(config, *, samples=200, corpus_scope='live_observed', import_secon
         elapsed.append((time.perf_counter_ns() - start) / 1_000_000)
     ordered = sorted(elapsed)
     percentile = lambda fraction: ordered[math.ceil(fraction * len(ordered)) - 1]
-    paths = [archive.path, Path(str(archive.path) + '-wal'), Path(str(archive.path) + '-shm')]
-    return {'corpus_scope': corpus_scope, 'message_count': archive.status()['counts'].get('messages', 0),
+    return {'corpus_scope': corpus_scope, 'message_count': sum(sizes.values()),
             'sample_count': samples, 'cache_state': 'warm_after_query_mix', 'query_mix': [name for name, _ in calls],
             'warm_query_ms': {'p50': round(statistics.median(elapsed), 3), 'p95': round(percentile(.95), 3),
                               'p99': round(percentile(.99), 3), 'maximum': round(max(elapsed), 3)},
-            'archive_bytes': sum(path.stat().st_size for path in paths if path.exists()),
-            'import_seconds': import_seconds, 'python': platform.python_version(), 'sqlite': sqlite3.sqlite_version,
+            'python': platform.python_version(), 'sqlite': sqlite3.sqlite_version,
             'platform': platform.system(), 'architecture': platform.machine(), 'cpu_count': os.cpu_count(),
             'target_p95_ms': 250, 'representative_large_archive_claim': False,
             'includes_attachment_decoding': False, 'includes_model_inference': False,
-            'includes_source_import_during_queries': False}
+            'source': 'live'}
 
 
 def main():
@@ -61,8 +63,7 @@ def main():
             raise BridgeError('invalid_synthetic_size')
         from tests.support.schemas import account_case, TABLE
         from tests.support.encrypted import Engine
-        from wechat_bridge.adapters.wechat_4_1 import open_adapter
-        from wechat_bridge.archive.importer import refresh_archive
+        from tests.support.live import factory
         with tempfile.TemporaryDirectory(prefix='wechat-synthetic-benchmark-') as folder:
             config = account_case(Path(folder).resolve())
             with Engine(config.account_root / 'db_storage/message/message_0.db') as writer:
@@ -71,11 +72,7 @@ def main():
                     values = ','.join(f"({n},{n},1,1,{1700000000+n},'发票 invoice 🐈 synthetic {n}',0)" for n in range(start, min(start + 500, args.synthetic_records + 1)))
                     writer.run(f'INSERT INTO {TABLE}(local_id,server_id,local_type,real_sender_id,create_time,message_content,WCDB_CT_message_content) VALUES' + values)
                 writer.run('COMMIT')
-            started = time.perf_counter()
-            imported = refresh_archive(config, adapter_factory=lambda cfg: open_adapter(cfg, build='270102'))
-            if imported['status'] != 'complete':
-                raise BridgeError('synthetic_import_failed')
-            result = benchmark(config, samples=args.samples, corpus_scope='synthetic_fixture', import_seconds=time.perf_counter() - started)
+            result = benchmark(config, samples=args.samples, corpus_scope='synthetic_fixture', adapter_factory=factory)
     print(json.dumps(result))
 
 

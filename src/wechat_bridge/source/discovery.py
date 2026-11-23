@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import itertools
+import json
 import uuid
 
 from ..core.config import Config, read_private_json, write_private_json, reject_symlinks, state_lock
@@ -61,6 +62,7 @@ def discover(config: Config) -> Inventory:
             registry_path = config.state_dir / "inventory.json"
             registry = read_private_json(registry_path) if registry_path.exists() else {
                 "version": 1, "account_id": str(uuid.uuid4()), "databases": {}}
+            before = json.dumps(registry, sort_keys=True)
             root = config.account_root / "db_storage"
             reject_symlinks(root, "source_symlink")
             if not root.is_dir():
@@ -99,7 +101,9 @@ def discover(config: Config) -> Inventory:
                     entry.get("replaced", False)))
             if not REQUIRED.issubset(observed) or not any(MESSAGE_SHARD.fullmatch(p) for p in observed):
                 issues.append("required_source_missing")
-            write_private_json(registry_path, registry)
+            # Queries call discover on every read; only a new or changed incarnation is written.
+            if json.dumps(registry, sort_keys=True) != before or not registry_path.exists():
+                write_private_json(registry_path, registry)
             return Inventory(registry["account_id"], tuple(databases), tuple(sorted(set(issues))))
     except OSError:
         raise BridgeError("source_unreadable") from None

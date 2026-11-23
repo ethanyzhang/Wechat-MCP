@@ -1,7 +1,6 @@
 """Verified bounded bytes and safe status, independently of protocol encoding."""
 from functools import cached_property
 
-from ..archive.importer import archive_status
 from ..attachments.resolver import resolve_attachment
 from ..core.config import Config, read_private_json, reject_symlinks
 from ..core.errors import BridgeError
@@ -18,13 +17,14 @@ class ToolService:
     """Query and attachment operations behind the MCP tools; read-only, bounded, redacted status."""
     read_only = True
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, adapter_factory=None):
         self.config = config
+        self._adapter_factory = adapter_factory
 
     @cached_property
     def queries(self):
-        """Repository over the archive, created on first use."""
-        return QueryRepository(self.config)
+        """Live query repository, created on first use."""
+        return QueryRepository(self.config, adapter_factory=self._adapter_factory)
 
     # Reads at most 64 proof files; the newest live proof wins.
     def _acceptance(self) -> dict:
@@ -44,9 +44,12 @@ class ToolService:
         return {'status': 'not_attested'}
 
     def status(self) -> dict:
-        """Archive status, key count, acceptance state and public limits; carries no key material or paths."""
+        """Live source readiness and coverage, key count, acceptance state and public limits; carries no key material or paths."""
         from ..cli import doctor
-        result = archive_status(self.config)
+        try:
+            result = self.queries.source_status()
+        except BridgeError as error:
+            result = {'ready_for_local_queries': False, 'source_error': error.code}
         try:
             count = len(load_manifest(self.config.state_dir / 'keys.json').entries)
             key_error = None
@@ -67,7 +70,7 @@ class ToolService:
                          'image_decoding': {'supported': ['JPEG', 'PNG', 'WEBP', 'legacy_XOR', 'V1_DAT', 'V2_DAT'],
                                             'unsupported': ['animated', 'WXGF', 'HEVC']}}
 
-    def attachment(self, attachment_id: str, *, representation: str = 'auto', max_bytes: int = DEFAULT_CONTENT_BYTES, generation: int | None = None) -> tuple:
+    def attachment(self, attachment_id: str, *, representation: str = 'auto', max_bytes: int = DEFAULT_CONTENT_BYTES) -> tuple:
         """Return (metadata, bytes or None) for one attachment, at most max_bytes.
 
         Raises invalid_content_limit, invalid_representation, unsupported_representation or content_too_large.
@@ -75,14 +78,14 @@ class ToolService:
         require_int_range(max_bytes, 1, MAX_CONTENT_BYTES, 'invalid_content_limit')
         if representation not in ('auto', 'source', 'decoded'):
             raise BridgeError('invalid_representation')
-        ref, generation = self.queries.attachment_ref(attachment_id, generation=generation)
+        ref = self.queries.attachment_ref(attachment_id)
         content = ('decoded' if ref.kind == 'image' else 'source') if representation == 'auto' else representation
         if content == 'decoded' and ref.kind != 'image':
             raise BridgeError('unsupported_representation')
         with resolve_attachment(ref, self.config, decode=content == 'decoded',
                                 max_source_bytes=max_bytes if content == 'source' else None) as result:
             metadata = {'attachment_id': ref.attachment_id, 'message_id': ref.message_id, 'kind': ref.kind,
-                        'generation': generation, 'original_filename': ref.original_filename,
+                        'original_filename': ref.original_filename,
                         'availability': result.availability, 'representation': result.representation,
                         'content_representation': content, 'diagnostic_code': result.diagnostic_code,
                         'source_sha256': result.source_sha256, 'decoded_sha256': result.decoded_sha256,
@@ -101,5 +104,5 @@ class ToolService:
                 data = result.handle.read(max_bytes + 1)
                 if len(data) > max_bytes:
                     raise BridgeError('content_too_large')
-            metadata |= {'size': len(data), 'resource_uri': f'wechat-attachment://content/{generation}/{attachment_id}/{content}'}
+            metadata |= {'size': len(data), 'resource_uri': f'wechat-attachment://content/{attachment_id}/{content}'}
             return metadata, data
