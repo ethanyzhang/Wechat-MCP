@@ -40,6 +40,7 @@ class PassphraseTally:
     def __init__(self):
         self._mac_key = os.urandom(32)
         self._calls = {}
+        self._opened = {}
         self.rounds = {'matched_salt_calls_256000': 0, 'matched_salt_calls_2': 0}
 
     def observe(self, rounds, secret):
@@ -72,10 +73,15 @@ class PassphraseTally:
                 key = hashlib.pbkdf2_hmac('sha512', secret, salt, 256000, 32)
                 opened += sum(1 for _, page in rows if page[:16] == salt and verified(key, page))
             entry['databases_verified'] = opened
+            self._opened[secret] = opened
             if truncated:
                 entry['truncated'] = True
             out.append(entry)
         return out
+
+    def shared_secrets(self, minimum=2):
+        """Secrets that opened at least `minimum` databases in the last report (hex, for captured.json only)."""
+        return [secret.hex() for secret, opened in self._opened.items() if opened >= minimum]
 
 
 def private_json(path, data):
@@ -212,7 +218,13 @@ def main():
         secrets_error=False
         try: secrets=tally.report(rows,budget=min(60,started+225-time.monotonic()))
         except Exception: secrets,secrets_error=[],True
-        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,**counts,**tally.rounds)
+        shared = tally.shared_secrets() if found and not secrets_error else []
+        if shared:
+            # One passphrase opens several databases: hand it to setup, which verifies it again
+            # before storing it beside keys.json. captured.json is 0600 like the raw keys.
+            try: private_json(args.out, {'keys':found,'master_secrets':shared})
+            except OSError: pass
+        emit('capture_finished',verified_databases=len(found),total_databases=len(rows),secrets=secrets,secrets_error=secrets_error,master_secrets_handed_over=len(shared),**counts,**tally.rounds)
         if found:
             return 0
         return 4 if process_ended else 3

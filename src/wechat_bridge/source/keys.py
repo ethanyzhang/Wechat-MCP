@@ -1,5 +1,6 @@
 """Exact per-database keys; verified coverage never implies full-page integrity."""
 from dataclasses import dataclass, field, replace
+import hashlib
 import hmac
 from pathlib import Path, PurePosixPath
 import re
@@ -179,3 +180,94 @@ def publish_verified_manifest(manifest: KeyManifest, coverage: Coverage, config:
         write_private_json(path, KeyManifest(tuple(merged.values())).private_dict())
         if registry is not None:
             write_private_json(registry_path, registry)
+
+
+# A master secret is the passphrase WeChat passes to SQLCipher: every database's key is
+# PBKDF2-SHA512(secret, that database's salt, 256000 rounds). It opens future databases too,
+# so it sits beside keys.json under the same private-state protection and is never logged,
+# exported or returned.
+MASTER_SECRETS_FILE = "master_secrets.json"
+SECRET_MAX_BYTES = 256  # the capture reads at most 256 bytes per PBKDF input
+
+
+def load_master_secrets(config: Config) -> dict[str, bytes]:
+    """Account ID to master secret from master_secrets.json; empty when none was captured.
+
+    Raises invalid_master_secrets or private-state errors.
+    """
+    path = config.state_dir / MASTER_SECRETS_FILE
+    if not path.exists():
+        return {}
+    data = read_private_json(path)
+    try:
+        rows = data["secrets"]
+        if data.get("version") != 1 or not isinstance(rows, dict):
+            raise ValueError
+        secrets = {}
+        for account_id, secret_hex in rows.items():
+            secret = bytes.fromhex(secret_hex)
+            if not account_id or not 0 < len(secret) <= SECRET_MAX_BYTES:
+                raise ValueError
+            secrets[account_id] = secret
+        return secrets
+    except (KeyError, TypeError, ValueError):
+        raise BridgeError("invalid_master_secrets") from None
+
+
+def save_master_secret(config: Config, account_id: str, secret: bytes) -> None:
+    """Store the secret for one account under the state lock, keeping other accounts' secrets."""
+    with state_lock(config):
+        secrets = load_master_secrets(config)
+        secrets[account_id] = secret
+        write_private_json(config.state_dir / MASTER_SECRETS_FILE,
+                           {"version": 1, "secrets": {a: s.hex() for a, s in secrets.items()}})
+
+
+def derive_entry(db, secret: bytes) -> KeyEntry:
+    """The candidate key SQLCipher computes for this database's salt from the secret (CPU-heavy)."""
+    key = hashlib.pbkdf2_hmac("sha512", secret, bytes.fromhex(db.salt_hex), 256000, 32)
+    return KeyEntry(db.account_id, db.relative_path, db.database_id, db.salt_hex, key)
+
+
+def verify_with_master_secrets(inventory: Inventory, manifest: KeyManifest, coverage: Coverage,
+                               secrets: dict[str, bytes], config: Config) -> tuple[KeyManifest, Coverage]:
+    """Derive keys for databases the stored keys do not open and verify them like any candidate.
+
+    Only the CLI calls this: the derivation costs 256000 PBKDF2 rounds per database and the
+    secret must not load into the MCP process. A database whose passphrase differs stays
+    unverified, so a rotated passphrase needs a fresh capture. Returns the inputs unchanged
+    when nothing needed deriving.
+    """
+    merged = {e.identity: e for e in manifest.entries}
+    derived = False
+    for db, item in zip(inventory.databases, coverage.databases):
+        secret = secrets.get(db.account_id)
+        if secret is not None and item.status in ("missing_key", "replaced", "key_or_format_mismatch"):
+            entry = derive_entry(db, secret)
+            existing = merged.get(entry.identity)
+            if existing is not None:
+                # Same path and salt: the stored key already opens it, and a rotated ID stays
+                # unready until publication restores the key's ID, so derive nothing for it.
+                if item.status == "replaced":
+                    continue
+                entry = replace(entry, database_id=existing.database_id)
+            merged[entry.identity] = entry
+            derived = True
+    if not derived:
+        return manifest, coverage
+    manifest = KeyManifest(tuple(merged.values()))
+    return manifest, verify_keys(inventory, manifest, config)
+
+
+def confirm_master_secret(inventory: Inventory, candidates: list[bytes], config: Config) -> tuple[str, bytes] | None:
+    """The first candidate that opens at least two discovered databases, as (account ID, secret).
+
+    One database proves nothing about sharing, so a secret that opens a single database is not stored.
+    """
+    for secret in candidates:
+        for account_id in sorted({db.account_id for db in inventory.databases}):
+            dbs = [db for db in inventory.databases if db.account_id == account_id]
+            manifest = KeyManifest(tuple(derive_entry(db, secret) for db in dbs))
+            if sum(i.status == "verified" for i in verify_keys(inventory, manifest, config).databases) >= 2:
+                return account_id, secret
+    return None

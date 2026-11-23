@@ -13,7 +13,7 @@ class RecoveryResult:
     status: str
     key_copies_removed: bool = False
 
-KEY_COPIES = ("captured.json", "candidates.json")
+KEY_COPIES = ("captured.json", "captured.new", "candidates.json")  # captured.new: a killed helper's temp file
 
 
 def _remove_key_copies(plan: SetupPlan) -> bool:

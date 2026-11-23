@@ -180,6 +180,26 @@ it cannot be reversed or compared across runs. A passphrase shared by several
 databases shows as one entry with `databases_verified` above 1. No secret or
 key is emitted.
 
+### Master secret
+
+When one 256000-round input opens at least two databases, the helper adds it to
+`captured.json` (mode 0600, like the raw keys). Setup removes it from that file
+as soon as it reads it, re-checks that it opens at least two real databases,
+and stores it in `master_secrets.json` beside `keys.json` (mode 0600, written
+atomically, one secret per account). It is never printed, logged, exported or
+returned by any tool, and only the CLI loads it.
+
+`wechat-bridge verify-keys` uses it when stored keys leave a database
+unverified (a new shard, or a database WeChat rebuilt with a new salt): it
+derives that database's key with PBKDF2-SHA512 (256000 rounds, the database's
+own salt) and publishes it only if it opens the database. The MCP server never
+derives; after WeChat rebuilds a database, run `verify-keys` once to restore
+coverage. If WeChat rotates the passphrase, derivation fails, the database
+stays unverified and a fresh capture is needed. The secret also opens
+databases WeChat creates later, so protect `master_secrets.json` like
+`keys.json`. A capture made before this feature saved only derived keys, so
+one more capture is needed to store the secret.
+
 The plan's concrete commands are:
 
 - `codesign --verify --deep --strict /Applications/WeChat.app`, then

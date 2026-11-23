@@ -6,7 +6,8 @@ import time
 from ..core.config import read_private_json, write_private_json
 from ..core.errors import BridgeError
 from ..source.discovery import discover
-from ..source.keys import KeyEntry, KeyManifest, verify_keys, publish_verified_manifest
+from ..source.keys import (KeyEntry, KeyManifest, verify_keys, publish_verified_manifest,
+                           confirm_master_secret, save_master_secret, SECRET_MAX_BYTES)
 from .prepare import SetupPlan, fingerprint, update_journal
 from .recovery import _recover_setup
 from .lock import setup_lock, check_active_plan
@@ -53,12 +54,15 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         if backend.is_running(plan.app_path):
             raise BridgeError("client_exit_required")
         backend.capture(plan)
+        # Strip any master secret from captured.json before anything can fail.
+        rows = _scrub_captured(plan)
         raw = read_private_json(plan.directory / "captured.json")
         current = discover(plan.config)
         if fingerprint(current) != plan.source_fingerprint:
             raise BridgeError("source_changed")
         keys = raw.get("keys")
         if not isinstance(keys, dict): raise BridgeError("invalid_capture_output")
+        secrets = _parse_master_secrets(rows)
         entries = []
         for db in current.databases:
             row = keys.get(db.relative_path)
@@ -74,6 +78,10 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         # Captured keys are candidates; only keys that open their database are published.
         coverage = verify_keys(current, manifest, plan.config)
         publish_verified_manifest(manifest, coverage, plan.config)
+        # Stored only after it opens at least two real databases; an unconfirmed one is dropped.
+        confirmed = confirm_master_secret(current, secrets, plan.config) if secrets else None
+        if confirmed is not None:
+            save_master_secret(plan.config, *confirmed)
         status = "verified" if coverage.ready else "partial_coverage"
         update_journal(plan, stage="keys_verified", coverage=coverage.public_dict())
     except KeyboardInterrupt:
@@ -83,6 +91,8 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
     except OSError:
         status = "setup_io_failed"
     finally:
+        # The helper may have written a secret before a later failure (timeout, kill): scrub every exit.
+        _scrub_captured(plan)
         # Recovery runs on every exit path so the copy never outlives the capture.
         try:
             update_journal(plan, capture_status=status)
@@ -91,3 +101,38 @@ def _run_capture(plan: SetupPlan, *, backend=None) -> CaptureResult:
         finally:
             recovered = _recover_setup(plan, backend=backend)
     return CaptureResult(status, candidate_path, recovered.status, recovered.key_copies_removed)
+
+
+def _scrub_captured(plan: SetupPlan) -> list:
+    """Remove master_secrets from captured.json and return the removed rows (unvalidated).
+
+    captured.json is deleted only after a fully verified capture, so a secret must never
+    wait there. If the rewrite fails the whole file goes, since it is only a candidate copy.
+    """
+    path = plan.directory / "captured.json"
+    try: (plan.directory / "captured.new").unlink(missing_ok=True)   # a killed helper's temp file
+    except OSError: pass
+    try:
+        raw = read_private_json(path)
+    except (BridgeError, OSError):
+        return []
+    if "master_secrets" not in raw:
+        return []
+    rows = raw["master_secrets"]
+    try:
+        write_private_json(path, {k: v for k, v in raw.items() if k != "master_secrets"})
+    except (BridgeError, OSError):
+        try: path.unlink()
+        except OSError: pass
+    return rows if isinstance(rows, list) else [None]
+
+
+def _parse_master_secrets(rows: list) -> list[bytes]:
+    """Hex rows to secrets; raises invalid_capture_output on anything malformed."""
+    try:
+        secrets = [bytes.fromhex(row) for row in rows]
+    except (TypeError, ValueError):
+        raise BridgeError("invalid_capture_output") from None
+    if any(not 0 < len(secret) <= SECRET_MAX_BYTES for secret in secrets):
+        raise BridgeError("invalid_capture_output")
+    return secrets

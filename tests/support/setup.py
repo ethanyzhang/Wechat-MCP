@@ -16,6 +16,7 @@ class FakeBackend:
         self.signed = []
         self.fail = None
         self.candidates = {}
+        self.master_secrets = None
         self.owned_identity = None
         self.current_identity = None
         self.stopped = []
@@ -31,7 +32,9 @@ class FakeBackend:
     def capture(self, plan):
         if self.fail == "cancel": raise KeyboardInterrupt
         if self.fail: raise BridgeError(self.fail)
-        write_private_json(plan.directory / "captured.json", {"keys": self.candidates})
+        captured = {"keys": self.candidates}
+        if self.master_secrets is not None: captured["master_secrets"] = self.master_secrets
+        write_private_json(plan.directory / "captured.json", captured)
     def stop_owned(self, plan):
         if self.current_identity is not None:
             if self.current_identity != self.owned_identity:

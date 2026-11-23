@@ -97,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
             if not manifest_path.exists():
                 raise BridgeError("setup_required")
             manifest = load_manifest(manifest_path)
-            coverage = verify_keys(discover(cfg), manifest, cfg)
+            inventory = discover(cfg)
+            coverage = verify_keys(inventory, manifest, cfg)
+            if not coverage.ready:
+                from .source.keys import load_master_secrets, verify_with_master_secrets
+                manifest, coverage = verify_with_master_secrets(inventory, manifest, coverage, load_master_secrets(cfg), cfg)
             publish_verified_manifest(manifest, coverage, cfg)
             print(json.dumps(coverage.public_dict()))
             return 0 if coverage.ready else 2
