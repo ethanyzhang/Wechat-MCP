@@ -21,7 +21,7 @@ Want to contribute? Read [.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md).
 | Document | Owns |
 | --- | --- |
 | [architecture.md](architecture.md) | Packages, dependency direction, runtime state, key contracts and limits |
-| [mcp.md](mcp.md) | MCP tools, arguments, limits, attachment delivery, paging, errors, client registration, and the optional send tool (`serve --enable-send`) |
+| [mcp.md](mcp.md) | MCP tools and their command-line equivalents, arguments, limits, attachment delivery, paging, errors, client registration, and the optional send tool (`serve --enable-send`) |
 | [setup.md](setup.md) | One-time key capture procedure, outcomes and recovery |
 | [compatibility.md](compatibility.md) | Tested environment, format support, latest live observations, known gaps |
 | [troubleshooting.md](troubleshooting.md) | Error codes and symptoms, what each means, the safe next step |

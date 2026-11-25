@@ -54,6 +54,41 @@ repository has checked out. Switching branches changes the code that the next
 imported yet. A `serve` process started before an upgrade keeps running the old
 code until its client restarts it.
 
+## Command line
+
+Every tool is also a `wechat-bridge` subcommand that calls the same service
+method and prints the same JSON object on stdout, then exits: nothing runs in
+the background, and each command reads the databases when it runs. Tool names
+become dashed commands and arguments become dashed flags; the ID argument of
+`get_group`, `get_messages`, `get_moment`, `get_context` and `get_attachment`
+and the query of `search_messages` are positional.
+
+```sh
+wechat-bridge list-conversations --unread-only --sort recent --limit 20
+wechat-bridge recent-messages --start 2026-11-24T00:00:00-06:00
+wechat-bridge search-messages 发票 --conversation-id conversation_<hex>
+wechat-bridge get-context message_<hex> --before 5 --after 5
+wechat-bridge get-attachment attachment_<hex> --output ~/Desktop/file.bin
+printf '%s' "text" | wechat-bridge send-message --conversation-id conversation_<hex> --recipient-name "Full name"
+```
+
+- Errors print `{"error": code}` and exit 2; argument errors print
+  `invalid_arguments` without echoing the value.
+- `get-attachment` prints the metadata. With `--output PATH` it also writes the
+  bytes to a new file (mode 0600; an existing path is `output_exists`). There is
+  no `resource_uri` on the command line.
+- `send-message` reads the text from stdin (trailing newlines removed) and goes
+  through the same sender, log, limits and lock as `send_message` below. It is
+  not gated by a flag and asks for no approval of its own: the caller decides,
+  as with an allowlisted MCP tool. `sent` exits 0, `unconfirmed` exits 3 (never
+  resend); a Ctrl-C during the press or its confirmation also ends as a logged
+  `unconfirmed`. Allow it a long timeout: the first send compiles the helper
+  (up to 300 s, once per helper version) and opening a chat may take up to 120 s.
+- `status` reports `read_only: true`: it describes the read commands.
+- Shared state (`inventory.json`, `identity.json`, `keys.json`) is written under
+  the state-directory lock and replaced atomically, so concurrent commands are
+  safe; sends are serialized by the send lock.
+
 ## Tools
 
 All thirteen tools are annotated read-only, non-destructive, idempotent and closed-world.

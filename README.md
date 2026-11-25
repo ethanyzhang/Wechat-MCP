@@ -451,12 +451,14 @@ The state directory defaults to `~/Library/Application Support/WechatBridge`
 | `inspect-schema` | Validate the tested build's required column mappings |
 | `setup prepare` / `setup run --plan-id ID` / `setup recover --plan-id ID` | One-time key capture and its recovery |
 | `verify-keys [--manifest PATH]` | Re-authenticate saved keys against each database |
-| `search QUERY [--limit N]` | Print matching messages, read live from WeChat's databases |
+| `status`, `list-conversations`, `list-contacts`, `get-group`, `search-messages` (alias `search`), `get-messages`, `recent-messages`, `list-moments`, `get-moment`, `list-moment-notifications`, `get-context`, `list-attachments`, `get-attachment` | One command per MCP tool, same answers, read live from WeChat's databases (see [docs/mcp.md](docs/mcp.md#command-line)) |
+| `send-message --conversation-id ID --recipient-name NAME` | Send the text on stdin, with the same guards as `send_message` |
 | `serve [--enable-send]` | Run the MCP server over stdio; `--enable-send` adds `send_message` (see [docs/mcp.md](docs/mcp.md#sending-optional-off-by-default)) |
 | `prove --selection PATH` | Source-acceptance proof against a private selection (maintainer tool) |
 
-Output is JSON. Exit codes: `0` ok, `2` blocked, not ready or any
-`BridgeError`, `1` proof failed, `130` interrupted.
+Output is JSON. Exit codes: `0` ok, `2` blocked, not ready, bad arguments
+(`{"error": "invalid_arguments"}`) or any `BridgeError`, `1` proof failed,
+`3` send unconfirmed (never resend), `130` interrupted.
 
 ### MCP tools
 

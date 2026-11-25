@@ -21,6 +21,7 @@ class Fake:
         self.bubbles = ['older']; self.calls = []; self.send_enabled = True
         self.fail_after_click = False; self.open_title = open_title; self.set_ignored = False; self.press_error = None; self.on_set = None
 
+    def prepare(self): self.calls.append('prepare')   # MacDriver.prepare: build the helper
     def trusted(self): return self._trusted
     def activate(self): self.calls.append('activate')
     def open_chat(self, name):
@@ -347,3 +348,16 @@ def test_well_formed_but_incomplete_send_log_row_is_send_log_unavailable(tmp_pat
     log.path.write_text(line + '\n')
     log.path.chmod(0o600)
     assert code(lambda: log.check_allowed(CONV, 'y')) == 'send_log_unavailable'
+
+
+@pytest.mark.parametrize('where', ['press', 'confirm'])
+def test_an_interrupt_during_the_press_or_the_confirmation_is_a_logged_unconfirmed(tmp_path, where):
+    sender, driver, log, _ = build(tmp_path)
+    if where == 'press':
+        driver.press_error = KeyboardInterrupt()
+    else:
+        driver.echo = False
+        sender.sleep = lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
+    assert sender.send(CONV, 'Alice', 'hi')['state'] == 'unconfirmed'
+    rows = [json.loads(line) for line in (tmp_path / 'send-log.jsonl').read_text().splitlines()]
+    assert [r['event'] for r in rows] == ['attempt', 'result'] and rows[-1]['state'] == 'unconfirmed'
