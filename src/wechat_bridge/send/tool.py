@@ -7,8 +7,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from ..core.errors import BridgeError
-from .log import DEFAULT_DIR, SendLog, send_lock
-from .sender import MAX_TEXT_CHARACTERS, Sender
+from .log import DEFAULT_DIR
+from .sender import MAX_TEXT_CHARACTERS, build_sender
 
 ConversationId = Annotated[str, Field(strict=True, pattern=r'^conversation_[0-9a-f]{64}$')]
 RecipientName = Annotated[str, Field(strict=True, min_length=1, max_length=256)]
@@ -32,9 +32,7 @@ def register_send(server, allowed_arguments, service, config, invoke, driver=Non
 
     def sender():
         if 'sender' not in holder:
-            repository = service.queries
-            holder['sender'] = Sender(driver, SendLog(log_directory, repository.identity_key), repository.resolve_recipient,
-                                      lock=lambda: send_lock(log_directory))
+            holder['sender'] = build_sender(service.queries, driver, log_directory)
         return holder['sender']
 
     annotations = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True)

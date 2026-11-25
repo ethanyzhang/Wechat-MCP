@@ -128,3 +128,9 @@ class Sender:
             if self.clock() >= end:
                 return 'unconfirmed'
             self.sleep(0.25)
+
+
+def build_sender(repository, driver, directory) -> Sender:
+    """The Sender every entry point uses (CLI and MCP): the shared per-user send log and lock in `directory`."""
+    return Sender(driver, SendLog(directory, repository.identity_key), repository.resolve_recipient,
+                  lock=lambda: send_lock(directory))
