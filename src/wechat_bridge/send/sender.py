@@ -97,12 +97,14 @@ class Sender:
             self._clear_if_ours(name, kind, text)
             self.log.result(conversation_id, text, 'refused_' + error.code)
             raise BridgeError('refused_' + error.code) from None
-        except Exception:
-            outcome = 'unconfirmed'      # The press may have happened: never claim otherwise, never retry.
+        except BaseException:
+            # The press may have happened: never claim otherwise, never retry. BaseException: a Ctrl-C in the command line
+            # during the press or the confirmation still ends as a logged `unconfirmed`, never as "cancelled".
+            outcome = 'unconfirmed'
         else:
             try:
                 outcome = self._confirm(name, kind, text, baseline)
-            except Exception:
+            except BaseException:
                 outcome = 'unconfirmed'
         self.log.result(conversation_id, text, outcome)
         if outcome == 'sent':

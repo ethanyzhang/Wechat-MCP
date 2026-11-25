@@ -125,7 +125,7 @@ def test_send_message_reads_text_from_stdin_and_uses_the_shared_guards(cli, tmp_
     monkeypatch.setattr('wechat_bridge.send.log.DEFAULT_DIR', tmp_path / 'send-dir')
     args = ['send-message', '--conversation-id', conversation_id, '--recipient-name', name]
     assert run(*args, stdin='hello\nthere\n') == (0, {'state': 'sent', 'evidence': 'window_shows_message'})
-    assert driver.calls[-2:] == ['set:hello\nthere', 'click']
+    assert driver.calls[0] == 'prepare' and driver.calls[-2:] == ['set:hello\nthere', 'click']
     assert run(*args, stdin='hello\nthere\n') == (2, {'error': 'throttled'})   # the shared 3 s interval
     assert (tmp_path / 'send-dir' / 'send-log.jsonl').is_file()
     wrong = ['send-message', '--conversation-id', conversation_id, '--recipient-name', name + 'x']

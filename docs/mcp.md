@@ -81,7 +81,9 @@ printf '%s' "text" | wechat-bridge send-message --conversation-id conversation_<
   through the same sender, log, limits and lock as `send_message` below. It is
   not gated by a flag and asks for no approval of its own: the caller decides,
   as with an allowlisted MCP tool. `sent` exits 0, `unconfirmed` exits 3 (never
-  resend).
+  resend); a Ctrl-C during the press or its confirmation also ends as a logged
+  `unconfirmed`. Allow it a long timeout: the first send compiles the helper
+  (up to 300 s, once per helper version) and opening a chat may take up to 120 s.
 - `status` reports `read_only: true`: it describes the read commands.
 - Shared state (`inventory.json`, `identity.json`, `keys.json`) is written under
   the state-directory lock and replaced atomically, so concurrent commands are

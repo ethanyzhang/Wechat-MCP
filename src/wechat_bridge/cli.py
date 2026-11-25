@@ -117,33 +117,30 @@ def _add_tool_commands(subs) -> None:
     c.add_argument("--recipient-name", required=True)
 
 
-def _run_tool(service, args):
-    """Call the ToolService/QueryRepository method behind the MCP tool of the same name."""
-    q = lambda: service.queries
-    command = "search-messages" if args.command == "search" else args.command
-    return {
-        "status": lambda: service.status(),
-        "list-conversations": lambda: q().list_conversations(args.query, kind=args.kind, unread_only=args.unread_only,
-                                                             sort=args.sort, limit=args.limit, cursor=args.cursor),
-        "list-contacts": lambda: q().list_contacts(args.query, limit=args.limit, cursor=args.cursor),
-        "get-group": lambda: q().get_group(args.conversation_id, limit=args.limit, cursor=args.cursor),
-        "search-messages": lambda: q().search_messages(args.query, conversation_id=args.conversation_id, sender_id=args.sender_id,
-                                                       start=args.start, end=args.end, type=args.type, limit=args.limit,
-                                                       cursor=args.cursor),
-        "get-messages": lambda: q().get_messages(args.conversation_id, sender_id=args.sender_id, start=args.start, end=args.end,
-                                                 type=args.type, limit=args.limit, cursor=args.cursor),
-        "recent-messages": lambda: q().recent_messages(args.start, end=args.end, type=args.type, sender_id=args.sender_id,
-                                                       order=args.order, limit=args.limit, cursor=args.cursor),
-        "list-moments": lambda: q().list_moments(author_id=args.author_id, query=args.query, start=args.start, end=args.end,
-                                                 limit=args.limit, cursor=args.cursor),
-        "get-moment": lambda: q().get_moment(args.moment_id),
-        "list-moment-notifications": lambda: q().list_moment_notifications(moment_id=args.moment_id, start=args.start,
-                                                                           end=args.end, limit=args.limit, cursor=args.cursor),
-        "get-context": lambda: q().get_context(args.message_id, before=args.before, after=args.after),
-        "list-attachments": lambda: q().list_attachments(args.message_id, kind=args.kind, representation=args.representation,
-                                                         availability=args.availability, limit=args.limit, cursor=args.cursor),
-        "get-attachment": lambda: _get_attachment(service, args),
-    }[command]()
+# Command -> call of the ToolService/QueryRepository method behind the MCP tool of the same name; the one list of read commands.
+TOOLS = {
+    "status": lambda s, a: s.status(),
+    "list-conversations": lambda s, a: s.queries.list_conversations(a.query, kind=a.kind, unread_only=a.unread_only, sort=a.sort,
+                                                                    limit=a.limit, cursor=a.cursor),
+    "list-contacts": lambda s, a: s.queries.list_contacts(a.query, limit=a.limit, cursor=a.cursor),
+    "get-group": lambda s, a: s.queries.get_group(a.conversation_id, limit=a.limit, cursor=a.cursor),
+    "search-messages": lambda s, a: s.queries.search_messages(a.query, conversation_id=a.conversation_id, sender_id=a.sender_id,
+                                                              start=a.start, end=a.end, type=a.type, limit=a.limit, cursor=a.cursor),
+    "get-messages": lambda s, a: s.queries.get_messages(a.conversation_id, sender_id=a.sender_id, start=a.start, end=a.end,
+                                                        type=a.type, limit=a.limit, cursor=a.cursor),
+    "recent-messages": lambda s, a: s.queries.recent_messages(a.start, end=a.end, type=a.type, sender_id=a.sender_id,
+                                                              order=a.order, limit=a.limit, cursor=a.cursor),
+    "list-moments": lambda s, a: s.queries.list_moments(author_id=a.author_id, query=a.query, start=a.start, end=a.end,
+                                                        limit=a.limit, cursor=a.cursor),
+    "get-moment": lambda s, a: s.queries.get_moment(a.moment_id),
+    "list-moment-notifications": lambda s, a: s.queries.list_moment_notifications(moment_id=a.moment_id, start=a.start, end=a.end,
+                                                                                  limit=a.limit, cursor=a.cursor),
+    "get-context": lambda s, a: s.queries.get_context(a.message_id, before=a.before, after=a.after),
+    "list-attachments": lambda s, a: s.queries.list_attachments(a.message_id, kind=a.kind, representation=a.representation,
+                                                                availability=a.availability, limit=a.limit, cursor=a.cursor),
+    "get-attachment": lambda s, a: _get_attachment(s, a),
+}
+ALIASES = {"search": "search-messages"}
 
 
 def _get_attachment(service, args) -> dict:
@@ -183,6 +180,7 @@ def _send_message(config, args, *, driver=None, log_directory=None) -> dict:
     if driver is None:
         from .send.macos import MacDriver
         driver = MacDriver(config)
+        driver.prepare()   # build the helper (swiftc, first use only) before the send lock, as `serve` does at start
     sender = build_sender(ToolService(config).queries, driver, log_directory or DEFAULT_DIR)
     return sender.send(args.conversation_id, args.recipient_name, text)
 
@@ -222,9 +220,9 @@ def main(argv: list[str] | None = None) -> int:
             result = _send_message(load_config(args.state_dir), args)
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result["state"] == "sent" else EXIT_UNCONFIRMED
-        elif args.command in TOOL_COMMANDS:
+        elif ALIASES.get(args.command, args.command) in TOOLS:
             from .mcp.service import ToolService
-            result = _run_tool(ToolService(load_config(args.state_dir)), args)
+            result = TOOLS[ALIASES.get(args.command, args.command)](ToolService(load_config(args.state_dir)), args)
         elif args.command == "inspect-schema":
             from .adapters.wechat_4_1 import open_adapter
             result = open_adapter(load_config(args.state_dir)).public_dict()
@@ -279,10 +277,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         print(json.dumps({"error": "internal_error"}), file=sys.stderr if args.command == 'serve' else sys.stdout)
         return 2
-
-TOOL_COMMANDS = {"status", "list-conversations", "list-contacts", "get-group", "search-messages", "search", "get-messages",
-                 "recent-messages", "list-moments", "get-moment", "list-moment-notifications", "get-context", "list-attachments",
-                 "get-attachment"}
 
 if __name__ == "__main__":
     raise SystemExit(main())
