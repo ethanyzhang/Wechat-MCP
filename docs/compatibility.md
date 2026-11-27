@@ -50,7 +50,7 @@ setup capture. A future setup on this build needs its own revalidation.
 
 | Area | Supported | Unsupported or explicit |
 | --- | --- | --- |
-| Messages | Text, Zstandard text, image, file, reply | System variants and unknown types stay as unsupported records |
+| Messages | Text, Zstandard text, image, file, reply; system notices (type `system`): plain text, recall notices (`revokemsg`), templates (`sysmsgtemplate`, filled from their member nicknames and plain links) and pats (拍一拍, appmsg type 62, WeChat's rendered line) | Other system notices (such as group pins and payment notices) stay unsupported with `unsupported_system_type`; a template that cannot be filled without guessing a name stays unsupported with `unsupported_system_template`; unknown types stay as unsupported records |
 | Replies | Local originals resolve, including across shards | Unresolved references stay explicit; quoted names are content, not identity |
 | Groups | Recorded membership and group nicknames | Groups without recorded membership report it as unsupported |
 | Images | Static JPEG/PNG/WebP, legacy XOR, verified V1/V2 DAT | Animated, WXGF, HEVC; never replaced by a first frame |
