@@ -94,7 +94,7 @@ CUSTOM_LINK = re.compile(r"""<_wc_custom_link_\b(?:[^>"']|"[^"]*"|'[^']*')*>(.*?
 ENVELOPE = re.compile(r"<(?:sysmsg|msg|appmsg|\?xml)\b|<!\[CDATA\[", re.I)
 LEFTOVER_LINK = re.compile(r"</?_wc_custom_link_\b")
 # A value that is wholly one element (<a ...>...</a> or <a .../>), as opposed to text that merely holds "<".
-ELEMENT = re.compile(r"<([A-Za-z_][\w.:-]*)\b[^>]*(?:/>|>.*</\1\s*>)", re.S)
+ELEMENT = re.compile(r"""<([A-Za-z_][\w.:-]*)\b(?:[^>"'/]|"[^"]*"|'[^']*'|/(?!>))*(?:/>|>.*</\1\s*>)""", re.S)
 
 
 def readable(text: str | None) -> str:

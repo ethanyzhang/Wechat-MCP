@@ -220,8 +220,15 @@ def test_profile_separator_expansion_is_bounded_before_joining():
 
 def test_nickname_that_is_an_element_is_refused_but_angle_names_stay():
     from tests.support.samples import template, profile_link
-    refused = _notice(template("$username$ joined", profile_link("username", "<msg><token>t</token></msg>")))
-    assert (refused.text, refused.diagnostic_codes) == (None, ("unsupported_system_template",))
+    for nickname in ("<msg><token>t</token></msg>", '<a title=">"/>', '<a title=">">x</a>'):
+        refused = _notice(template("$username$ joined", profile_link("username", nickname)))
+        assert (refused.text, refused.diagnostic_codes) == (None, ("unsupported_system_template",))
+    from wechat_bridge.adapters.messages import readable
+    from wechat_bridge.core.errors import BridgeError
+    for value in ('<a title=">"/>', "<a/>", "<b>x</b>"):
+        with pytest.raises(BridgeError):
+            readable(value)
+    assert readable("<a> and <b>") == "<a> and <b>"
     kept = _notice(template("$username$ invited $names$", profile_link("username", "<Alice>") + profile_link("names", "<Bob>")))
     assert (kept.type, kept.text) == ("system", "<Alice> invited <Bob>")
 
