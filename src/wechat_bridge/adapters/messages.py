@@ -2,6 +2,7 @@
 import compression.zstd as zstd
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import re
 import xml.etree.ElementTree as ET
 
 from ..core.errors import BridgeError
@@ -82,14 +83,104 @@ def parse_xml(data: bytes):
         raise BridgeError("malformed_xml") from None
 
 
+# A template placeholder is $name$; a link name is a word.
+PLACEHOLDER = re.compile(r"\$(\w+)\$")
+# Leading characters ignored when deciding whether a notice body is XML.
+LEADING = "\ufeff \t\r\n"
+# WeChat marks an action inside a notice ("Re-edit", "Undo") as <_wc_custom_link_ href="...">label</_wc_custom_link_>;
+# the readable text keeps the label and drops the link. Attribute values are quote-aware so a quoted ">" ends nothing.
+CUSTOM_LINK = re.compile(r"""<_wc_custom_link_\b(?:[^>"']|"[^"]*"|'[^']*')*>(.*?)</_wc_custom_link_>""", re.S)
+# Markers of a WeChat XML envelope; readable notice text never contains them, nor leftover link markup.
+ENVELOPE = re.compile(r"<(?:sysmsg|msg|appmsg|\?xml)\b|<!\[CDATA\[", re.I)
+LEFTOVER_LINK = re.compile(r"</?_wc_custom_link_\b")
+# A value that is wholly one element (<a ...>...</a> or <a .../>), as opposed to text that merely holds "<".
+ELEMENT = re.compile(r"""<([A-Za-z_][\w.:-]*)\b(?:[^>"'/]|"[^"]*"|'[^']*'|/(?!>))*(?:/>|>.*</\1\s*>)""", re.S)
+
+
+def readable(text: str | None) -> str:
+    """Notice text with in-notice action links reduced to their labels.
+
+    Raises unsupported_system_variant for an empty value, one that is wholly an element, or one that still holds an
+    XML envelope or link markup, so raw XML never becomes text.
+    """
+    value = CUSTOM_LINK.sub(r"\1", text or "").strip()
+    if not value or ELEMENT.fullmatch(value) or ENVELOPE.search(value) or LEFTOVER_LINK.search(value):
+        raise BridgeError("unsupported_system_variant")
+    return value
+
+
+def _fill_template(content) -> str:
+    """Fill a sysmsgtemplate's template from its link_list in one pass over the template.
+
+    Every placeholder needs exactly one link of a known kind whose names are all present; anything else raises
+    unsupported_system_template, so a name is never guessed. Output is bounded by MAX_PAYLOAD characters.
+    """
+    template = content.findtext("template") or ""
+    links = {}
+    for link in content.findall("link_list/link"):
+        name = link.get("name")
+        if name in links:
+            links[name] = None
+        else:
+            links[name] = link
+    values = {}
+    for name in set(PLACEHOLDER.findall(template)):
+        link = links.get(name)
+        if link is None:
+            raise BridgeError("unsupported_system_template")
+        kind = link.get("type")
+        if kind == "link_profile":
+            names = [(member.findtext("nickname") or "").strip() for member in link.findall("memberlist/member")]
+            if not names or not all(names) or any(ELEMENT.fullmatch(n) for n in names):
+                raise BridgeError("unsupported_system_template")
+            separator = link.findtext("separator") or "、"
+            if sum(map(len, names)) + len(separator) * (len(names) - 1) > MAX_PAYLOAD:
+                raise BridgeError("payload_too_large")
+            values[name] = separator.join(names)
+        elif kind == "link_plain":
+            values[name] = readable(link.findtext("plain"))
+        else:
+            raise BridgeError("unsupported_system_template")
+    pieces = PLACEHOLDER.split(template)
+    # split alternates literal text and placeholder names: even indexes are literal, odd are names.
+    size = sum(len(piece) if index % 2 == 0 else len(values[piece]) for index, piece in enumerate(pieces))
+    if size > MAX_PAYLOAD:
+        raise BridgeError("payload_too_large")
+    return readable("".join(piece if index % 2 == 0 else values[piece] for index, piece in enumerate(pieces)))
+
+
+def system_text(data: bytes) -> str:
+    """Readable text of an XML system notice (local_type 10000 body starting with "<").
+
+    Supports recall notices (revokemsg) and filled templates (sysmsgtemplate). Raises unsupported_system_message for
+    a root other than sysmsg, unsupported_system_type for any other sysmsg type, and the parse_xml codes.
+    """
+    root = parse_xml(data)
+    if root.tag != "sysmsg":
+        raise BridgeError("unsupported_system_message")
+    kind = root.get("type")
+    if kind == "revokemsg":
+        return readable(root.findtext("revokemsg/content"))
+    if kind == "sysmsgtemplate":
+        content = root.find("sysmsgtemplate/content_template")
+        if content is None:
+            raise BridgeError("unsupported_system_template")
+        return _fill_template(content)
+    raise BridgeError("unsupported_system_type")
+
+
 def decode_message(row, source, identities) -> Message:
     """Decode one source row into a Message; never raises for bad content.
 
     Unsupported or malformed rows keep their identity and carry a status and diagnostic code with text=None.
     """
     conversation_id, username, kind = identities.conversation(source.database_id, source.table)
-    sender = identities.sender(source.database_id, row.get("real_sender_id"))
-    codes = [] if sender.status == "ok" else ["sender_" + sender.status]
+    raw_type = row.get("local_type")
+    # A system notice (local_type 10000) is WeChat's, not a member's: its real_sender_id names no Name2Id row in the
+    # tested builds, so it has no sender and no sender diagnostic.
+    notice = raw_type == 10000
+    sender = None if notice else identities.sender(source.database_id, row.get("real_sender_id"))
+    codes = [] if notice or sender.status == "ok" else ["sender_" + sender.status]
     value = row.get("create_time"); unit = row.get("timestamp_unit")
     utc = None
     try:
@@ -98,13 +189,25 @@ def decode_message(row, source, identities) -> Message:
         utc = (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=value * (1000000 if unit == "seconds" else 1000))).isoformat()
     except (OverflowError, ValueError, BridgeError):
         codes.append("invalid_timestamp")
-    raw_type = row.get("local_type")
-    message = Message(identities.message_id(source), conversation_id, sender.contact_id, str(value), str(unit), utc,
+    sender_id = None if notice else sender.contact_id
+    message = Message(identities.message_id(source), conversation_id, sender_id, str(value), str(unit), utc,
                       str(raw_type), "unsupported", None, source, "partial" if codes else "ok", tuple(codes))
     try:
         data = decode_payload(row.get("message_content"), row.get("WCDB_CT_message_content"))
         text = payload_text(data)
-        if kind == "group" and ":\n" in text:
+        if notice:
+            # A group notice may carry the conversation's own username as a prefix; only that prefix is removed.
+            body = text.lstrip(LEADING)
+            if kind == "group" and username and body.startswith(username + ":\n"):
+                body = body[len(username) + 2:].lstrip(LEADING)
+            if body.startswith("<"):
+                text = system_text(body.encode())
+            elif ENVELOPE.search(body):
+                # XML behind a prefix that is not this conversation's own: never returned as text.
+                raise BridgeError("unsupported_system_prefix")
+            else:
+                text = readable(body)
+        elif kind == "group" and ":\n" in text:
             prefix, rest = text.split(":\n", 1)
             if sender.status == "ok" and prefix == sender.source_username:
                 text = rest; data = rest.encode()
@@ -117,10 +220,10 @@ def decode_message(row, source, identities) -> Message:
             except BridgeError as error:
                 codes.append(error.code)
         base_type = raw_type & 0xffffffff if type(raw_type) is int else None
-        if raw_type == 1:
-            message = replace(message, type="text", text=text)
-        elif raw_type == 10000 and not text.lstrip().startswith("<"):
+        if notice:
             message = replace(message, type="system", text=text)
+        elif raw_type == 1:
+            message = replace(message, type="text", text=text)
         elif base_type == 3:
             root = parse_xml(data)
             if root.tag != "msg" or root.find("img") is None:
@@ -141,6 +244,9 @@ def decode_message(row, source, identities) -> Message:
                 message = replace(message, reply=reply)
                 if reply is None or reply.resolution_status == "unsupported":
                     codes.append("reply_variant_unsupported")
+            elif subtype == "62" and app.find("patinfo") is not None:
+                # A pat (拍一拍): WeChat renders who patted whom into the title; patinfo holds only usernames.
+                message = replace(message, type="system", text=readable(app.findtext("title")))
             elif subtype == "6":
                 message = replace(message, type="file", text=app.findtext("title") or None)
             else:
