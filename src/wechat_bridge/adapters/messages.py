@@ -85,24 +85,26 @@ def parse_xml(data: bytes):
 
 # A template placeholder is $name$; a link name is a word.
 PLACEHOLDER = re.compile(r"\$(\w+)\$")
-# A group notice is "<conversation username>:\n<body>"; a first line that ends in ":" before an XML body is a prefix too.
-PREFIXED_XML = re.compile(r"[^\n<]*:\n\s*<")
-
-
+# Leading characters ignored when deciding whether a notice body is XML.
+LEADING = "\ufeff \t\r\n"
 # WeChat marks an action inside a notice ("Re-edit", "Undo") as <_wc_custom_link_ href="...">label</_wc_custom_link_>;
-# the readable text keeps the label and drops the link.
-CUSTOM_LINK = re.compile(r"<_wc_custom_link_\b[^>]*>(.*?)</_wc_custom_link_>", re.S)
+# the readable text keeps the label and drops the link. Attribute values are quote-aware so a quoted ">" ends nothing.
+CUSTOM_LINK = re.compile(r"""<_wc_custom_link_\b(?:[^>"']|"[^"]*"|'[^']*')*>(.*?)</_wc_custom_link_>""", re.S)
+# Markers of a WeChat XML envelope; readable notice text never contains them, nor leftover link markup.
+ENVELOPE = re.compile(r"<(?:sysmsg|msg|appmsg|\?xml)\b|<!\[CDATA\[", re.I)
+LEFTOVER_LINK = re.compile(r"</?_wc_custom_link_\b")
+# A value that is wholly one element (<a ...>...</a> or <a .../>), as opposed to text that merely holds "<".
+ELEMENT = re.compile(r"<([A-Za-z_][\w.:-]*)\b[^>]*(?:/>|>.*</\1\s*>)", re.S)
 
 
-def unlink(text: str) -> str:
-    """Notice text with WeChat's in-notice action links reduced to their labels."""
-    return CUSTOM_LINK.sub(r"\1", text)
+def readable(text: str | None) -> str:
+    """Notice text with in-notice action links reduced to their labels.
 
-
-def _notice_value(value: str | None) -> str:
-    """One rendered piece of a notice; refuses an empty value or one that is itself an XML element."""
-    value = unlink(value or "").strip()
-    if not value or (value.startswith("<") and value.endswith(">")):
+    Raises unsupported_system_variant for an empty value, one that is wholly an element, or one that still holds an
+    XML envelope or link markup, so raw XML never becomes text.
+    """
+    value = CUSTOM_LINK.sub(r"\1", text or "").strip()
+    if not value or ELEMENT.fullmatch(value) or ENVELOPE.search(value) or LEFTOVER_LINK.search(value):
         raise BridgeError("unsupported_system_variant")
     return value
 
@@ -129,12 +131,14 @@ def _fill_template(content) -> str:
         kind = link.get("type")
         if kind == "link_profile":
             names = [(member.findtext("nickname") or "").strip() for member in link.findall("memberlist/member")]
-            if not names or not all(names):
+            if not names or not all(names) or any(ELEMENT.fullmatch(n) for n in names):
                 raise BridgeError("unsupported_system_template")
-            separator = link.findtext("separator")
-            values[name] = (separator if separator else "、").join(names)
+            separator = link.findtext("separator") or "、"
+            if sum(map(len, names)) + len(separator) * (len(names) - 1) > MAX_PAYLOAD:
+                raise BridgeError("payload_too_large")
+            values[name] = separator.join(names)
         elif kind == "link_plain":
-            values[name] = _notice_value(link.findtext("plain"))
+            values[name] = readable(link.findtext("plain"))
         else:
             raise BridgeError("unsupported_system_template")
     pieces = PLACEHOLDER.split(template)
@@ -142,7 +146,7 @@ def _fill_template(content) -> str:
     size = sum(len(piece) if index % 2 == 0 else len(values[piece]) for index, piece in enumerate(pieces))
     if size > MAX_PAYLOAD:
         raise BridgeError("payload_too_large")
-    return _notice_value("".join(piece if index % 2 == 0 else values[piece] for index, piece in enumerate(pieces)))
+    return readable("".join(piece if index % 2 == 0 else values[piece] for index, piece in enumerate(pieces)))
 
 
 def system_text(data: bytes) -> str:
@@ -156,7 +160,7 @@ def system_text(data: bytes) -> str:
         raise BridgeError("unsupported_system_message")
     kind = root.get("type")
     if kind == "revokemsg":
-        return _notice_value(root.findtext("revokemsg/content"))
+        return readable(root.findtext("revokemsg/content"))
     if kind == "sysmsgtemplate":
         content = root.find("sysmsgtemplate/content_template")
         if content is None:
@@ -193,15 +197,16 @@ def decode_message(row, source, identities) -> Message:
         text = payload_text(data)
         if notice:
             # A group notice may carry the conversation's own username as a prefix; only that prefix is removed.
-            if kind == "group" and username and text.startswith(username + ":\n"):
-                text = text[len(username) + 2:]
-            body = text.lstrip()
+            body = text.lstrip(LEADING)
+            if kind == "group" and username and body.startswith(username + ":\n"):
+                body = body[len(username) + 2:].lstrip(LEADING)
             if body.startswith("<"):
                 text = system_text(body.encode())
-            elif PREFIXED_XML.match(text):
+            elif ENVELOPE.search(body):
+                # XML behind a prefix that is not this conversation's own: never returned as text.
                 raise BridgeError("unsupported_system_prefix")
             else:
-                text = unlink(text)
+                text = readable(body)
         elif kind == "group" and ":\n" in text:
             prefix, rest = text.split(":\n", 1)
             if sender.status == "ok" and prefix == sender.source_username:
@@ -241,7 +246,7 @@ def decode_message(row, source, identities) -> Message:
                     codes.append("reply_variant_unsupported")
             elif subtype == "62" and app.find("patinfo") is not None:
                 # A pat (拍一拍): WeChat renders who patted whom into the title; patinfo holds only usernames.
-                message = replace(message, type="system", text=_notice_value(app.findtext("title")))
+                message = replace(message, type="system", text=readable(app.findtext("title")))
             elif subtype == "6":
                 message = replace(message, type="file", text=app.findtext("title") or None)
             else:

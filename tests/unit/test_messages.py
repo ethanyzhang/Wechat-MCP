@@ -197,3 +197,38 @@ def test_in_notice_action_links_keep_only_their_label():
     message = _notice(recall)
     assert (message.type, message.text) == ("system", "You recalled a message Re-edit")
     assert "weixin://" not in message.text
+
+
+@pytest.mark.parametrize("payload", ["\ufeff" + '<sysmsg type="x"/>', "\nother@chatroom:\n<sysmsg/>",
+                                     "Notice text then other@chatroom:\n<sysmsg/>"])
+def test_hidden_xml_never_becomes_text(payload):
+    message = _notice(payload, group=False)
+    assert (message.type, message.text) == ("unsupported", None)
+
+
+def test_bom_before_a_recall_notice_is_ignored():
+    from tests.support.samples import REVOKE
+    assert _notice("\ufeff" + REVOKE, group=False).text == '"Alice" recalled a message'
+
+
+def test_profile_separator_expansion_is_bounded_before_joining():
+    from tests.support.samples import template, profile_link
+    message = _notice(template("$names$", profile_link("names", *["a"] * 200, separator="x" * 6000)))
+    assert (message.text, message.parse_status) == (None, "malformed")
+    assert "payload_too_large" in message.diagnostic_codes
+
+
+def test_nickname_that_is_an_element_is_refused_but_angle_names_stay():
+    from tests.support.samples import template, profile_link
+    refused = _notice(template("$username$ joined", profile_link("username", "<msg><token>t</token></msg>")))
+    assert (refused.text, refused.diagnostic_codes) == (None, ("unsupported_system_template",))
+    kept = _notice(template("$username$ invited $names$", profile_link("username", "<Alice>") + profile_link("names", "<Bob>")))
+    assert (kept.type, kept.text) == ("system", "<Alice> invited <Bob>")
+
+
+def test_quoted_angle_in_a_link_attribute_does_not_leak_the_link():
+    link = '<_wc_custom_link_ title=">" href="weixin://synthetic/token">Re-edit</_wc_custom_link_>'
+    message = _notice("You recalled a message " + link, group=False)
+    assert message.text == "You recalled a message Re-edit"
+    broken = _notice('You recalled a message <_wc_custom_link_ href="weixin://synthetic/token">Re-edit', group=False)
+    assert (broken.text, broken.diagnostic_codes) == (None, ("unsupported_system_variant",))
