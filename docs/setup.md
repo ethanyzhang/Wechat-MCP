@@ -4,7 +4,7 @@ Setup captures WeChat's per-database SQLCipher keys once and saves them in the
 private state directory. Every ordinary read afterwards uses the saved keys.
 
 Supported environment: macOS on Apple silicon (arm64), WeChat 4.1.15 builds
-270102 and 270135, or 4.2.0 build 270390 (`SUPPORTED_VERSIONS` in `src/wechat_bridge/adapters/wechat_4_1.py`).
+270102 and 270135, 4.2.0 build 270390, or 4.2.1 build 270601 (`SUPPORTED_VERSIONS` in `src/wechat_bridge/adapters/wechat_4_1.py`).
 The number of required databases is four fixed databases plus one per message
 shard, so it differs between accounts (see [compatibility.md](compatibility.md)).
 
@@ -35,7 +35,7 @@ shard, so it differs between accounts (see [compatibility.md](compatibility.md))
 | Requirement | Check |
 | --- | --- |
 | Apple silicon Mac, macOS, not running as root | `uname -m` prints `arm64` |
-| WeChat 4.1.15 or 4.2.0 at `/Applications/WeChat.app`, signed in on this Mac | `uv run wechat-bridge doctor` shows `wechat_version` and `wechat_build` |
+| WeChat 4.1.15, 4.2.0 or 4.2.1 at `/Applications/WeChat.app`, signed in on this Mac | `uv run wechat-bridge doctor` shows `wechat_version` and `wechat_build` |
 | Apple Command Line Tools (provide `/usr/bin/lldb` and a `/usr/bin/python3` that imports `lldb`) | `xcode-select -p` prints a path; install with `xcode-select --install` |
 | SQLCipher native library (Homebrew `sqlcipher`, or built with `scripts/build_sqlcipher.py`) | `doctor` shows `"sqlcipher_available": true` |
 | Project environment | `uv sync --locked` (installs Python 3.14 if missing; `requires-python` is `>=3.14,<3.15`) |
@@ -55,7 +55,7 @@ Run every command from the repository root.
    `doctor` prints one JSON object with `python_version`, `architecture`,
    `sqlcipher_available`, `configured`, `wechat_version` and `wechat_build`.
    Continue only when `sqlcipher_available` is `true`, `wechat_version` is
-   `4.1.15` and `wechat_build` is `270102` or `270135`, or `4.2.0` and `270390`.
+   `4.1.15` and `wechat_build` is `270102` or `270135`, `4.2.0` and `270390`, or `4.2.1` and `270601`.
 
 2. Discover the account and create the configuration.
 

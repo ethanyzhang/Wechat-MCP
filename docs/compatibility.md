@@ -10,7 +10,7 @@ differs.
 | Component | Version |
 | --- | --- |
 | macOS | 27.0, arm64 |
-| WeChat | 4.1.15, builds 270102 and 270135; 4.2.0, build 270390 |
+| WeChat | 4.1.15, builds 270102 and 270135; 4.2.0, build 270390; 4.2.1, build 270601 |
 | Python | 3.14.6 |
 | Native SQLCipher / SQLite | 4.19.0 community / 3.53.4 (checksum-verified source build) |
 | MCP SDK | `mcp==2.3.0` (pinned) |
@@ -21,7 +21,7 @@ three steps:
 
 1. The installed app's `CFBundleShortVersionString` and `CFBundleVersion` must be
    a pair in `SUPPORTED_VERSIONS` (`4.1.15` with `270102` or `270135`; `4.2.0`
-   with `270390`). Otherwise the adapter raises `unsupported_build`.
+   with `270390`; `4.2.1` with `270601`). Otherwise the adapter raises `unsupported_build`.
 2. The required tables and columns must match the explicit mappings, and the
    rowid and primary-key identity constraints must hold. Otherwise the adapter
    raises `unsupported_schema`.
@@ -125,6 +125,27 @@ Reproduce the query-latency numbers with the synthetic benchmark:
 ```sh
 uv run python -m benchmarks.search --samples 200 --synthetic-records 10000
 ```
+
+### 27 November 2026 (build 270601, WeChat 4.2.1)
+
+WeChat auto-updated from 4.2.0 to 4.2.1 (build 270601) on 24 November 2026, and
+every tool failed closed with `unsupported_build`. The adapter now accepts the
+build on this evidence, gathered on the same account with ordinary reads. The
+build gate was widened only in memory for the check; no setup ran.
+
+| Check | Result |
+| --- | --- |
+| Keys | `verify-keys` with the saved keys verified 20 of 20 discovered databases, all 5 required ones among them (the four fixed databases and one message shard) |
+| Schema | `select_adapter`'s required-mapping and rowid checks pass on every required database; adapter status `ok`, with no column outside the known lists in the contact, session, resource, hardlink or message tables (145 message tables, one column shape) |
+| Optional sources | Moments (`sns/sns.db`) and the text index (`message/message_fts.db`) bind as `available` |
+| `status` | `ready_for_local_queries: true`, 0 unmapped message tables |
+| `list_conversations` (recent, 50) | 50 returned, all `ok` |
+| `recent_messages` (last 24 hours, 200) | 200 returned: 187 `ok` (text, reply, image, system); 13 `unsupported`, all source types that 4.2.0 also leaves unsupported (stickers, contact cards, other app messages) |
+| `search_messages` (one common character, 50) | 50 text results, all `ok` |
+
+Not re-checked for 270601: media formats, message-type coverage beyond this
+sample, latency and the LLDB setup capture. A future setup on this build needs
+its own revalidation.
 
 ## Known gaps
 

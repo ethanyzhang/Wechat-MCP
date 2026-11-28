@@ -136,7 +136,8 @@ def test_installed_build_gates_live_adapter(tmp_path, monkeypatch, build, ok):
 
 
 @pytest.mark.parametrize("version,build,ok", [("4.1.15", "270102", True), ("4.1.15", "270135", True), ("4.2.0", "270390", True),
-                                              ("4.1.15", "270390", False), ("4.2.0", "270102", False), ("4.3.0", "270390", False)])
+                                              ("4.2.1", "270601", True), ("4.1.15", "270390", False), ("4.2.0", "270102", False),
+                                              ("4.3.0", "270390", False), ("4.2.0", "270601", False), ("4.2.1", "270390", False)])
 def test_installed_version_and_build_must_be_a_supported_pair(tmp_path, monkeypatch, version, build, ok):
     import plistlib
     from wechat_bridge.adapters import wechat_4_1

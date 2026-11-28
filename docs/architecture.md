@@ -10,7 +10,7 @@ structural code change.
 flowchart LR
     S[setup/<br/>one-time key capture] -.keys.json.-> K
     D[(WeChat SQLCipher DBs + WAL)] --> K[source/<br/>discovery · keys · reader]
-    K --> A[adapters/<br/>builds 270102 · 270135 · 270390 mappings]
+    K --> A[adapters/<br/>builds 270102 · 270135 · 270390 · 270601 mappings]
     A --> I[search/<br/>live repository · cursor · tokenize]
     F[(WeChat media files)] --> T[attachments/<br/>mapping · resolver · images]
     A --> T
@@ -31,7 +31,7 @@ invariant; read it before editing the module.
 | Package | Responsibility | Key modules |
 | --- | --- | --- |
 | `source/` | Lowest layer above `core/`. Inventory DB identities without decrypting; hold exact per-database keys; run read-only, query-only, authorizer-restricted, deadline-bounded SQLCipher transactions. Never merges WAL pages manually. | `discovery`, `keys`, `native` (ctypes bindings), `reader` |
-| `adapters/` | Interpret source rows for the supported builds only (`SUPPORTED_VERSIONS` in `adapters/wechat_4_1.py`: 270102 and 270135 of WeChat 4.1.15, 270390 of 4.2.0). Bounded schema observation and identifier whitelisting; decode messages, replies, protobuf wire data; derive stable opaque IDs from a private persisted identity secret. Owns every SQL statement against WeChat, including keyset reads of message tables without decoding (`message_keys`, `local_ids`) and the optional `sns/sns.db` and `message/message_fts.db`, each bound only when its key is verified and its schema matches. Unmapped/malformed records keep their source identity and are reported, never dropped. | `wechat_4_1`, `schema`, `messages`, `replies`, `moments`, `identity`, `wire`, `models` |
+| `adapters/` | Interpret source rows for the supported builds only (`SUPPORTED_VERSIONS` in `adapters/wechat_4_1.py`: 270102 and 270135 of WeChat 4.1.15, 270390 of 4.2.0, 270601 of 4.2.1). Bounded schema observation and identifier whitelisting; decode messages, replies, protobuf wire data; derive stable opaque IDs from a private persisted identity secret. Owns every SQL statement against WeChat, including keyset reads of message tables without decoding (`message_keys`, `local_ids`) and the optional `sns/sns.db` and `message/message_fts.db`, each bound only when its key is verified and its schema matches. Unmapped/malformed records keep their source identity and are reported, never dropped. | `wechat_4_1`, `schema`, `messages`, `replies`, `moments`, `identity`, `wire`, `models` |
 | `search/` | The live query layer. Each call opens a fresh adapter, merges per-table keysets in one total order, and decodes only the rows its page needs. In-memory caches, keyed by the stat signature of the databases they come from, map opaque IDs back to source rows. Search reads the content tables of WeChat's own text index and matches NFKC/casefolded literal substrings in Python. Authenticated opaque cursors are bound to method, filters and limit. Writes nothing to disk. | `repository`, `cursor`, `tokenize` |
 | `attachments/` | Exact resource/hardlink joins on tested layouts; no-follow descriptor reads pinned beneath the account's media roots with size/digest/streaming SHA-256 checks; static image decoding; Media key material is separate from database keys. | `mapping`, `resolver`, `images`, `models` |
 | `mcp/` | `service` produces verified bounded bytes and safe status independently of protocol; `server` exposes thirteen typed read-only tools over stdio (stdout is protocol only). See [mcp.md](mcp.md). | `service`, `server` |

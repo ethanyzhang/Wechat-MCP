@@ -10,6 +10,8 @@ to follow [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
 - The adapter supports WeChat 4.2.0 build 270390 besides 4.1.15 builds 270102 and 270135. The version and build must now be a
   supported pair (`SUPPORTED_VERSIONS`), so 4.1.15 with 270390 or 4.2.0 with 270102 is `unsupported_build`.
+- The adapter supports WeChat 4.2.1 build 270601, whose required schemas and keys were checked on 27 November 2026
+  (docs/compatibility.md).
 - The MCP server reports its package version instead of a hard-coded one.
 - Every MCP tool and the CLI `search` now read WeChat's encrypted databases at call time through the read-only source reader
   and the adapter. The private archive (`archive.sqlite3`), its generations, importer, watcher and the bridge's own search index
