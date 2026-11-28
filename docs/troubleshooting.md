@@ -33,7 +33,7 @@ and the saved key count. It prints counts and no message text.
 | `setup_required` | `keys.json` does not exist. No capture has finished on this Mac. | Run the setup procedure once. If you had keys before, stop: do not recreate the file, and see [setup.md](setup.md#when-to-run-setup). |
 | `key_coverage_incomplete`, or `verify-keys` exits 2 with `"ready": false` | A required database has no verified key. WeChat may have created a new message shard. | Run `verify-keys` again and read `issues`. If a required database still shows `missing_key`, run setup once. Saved keys stay in place. |
 | `invalid_key_manifest` | `keys.json` failed validation. | Do not edit or delete it. Stop and report. Deleting it forces a new capture. |
-| `unsupported_build` | The installed WeChat is not 4.1.15 build 270102 or 270135, or 4.2.0 build 270390. | Wait for a project update. Setup cannot fix this and no downgrade is needed. See [compatibility.md](compatibility.md). |
+| `unsupported_build` | The installed WeChat is not 4.1.15 build 270102 or 270135, 4.2.0 build 270390, or 4.2.1 build 270601. | Wait for a project update. Setup cannot fix this and no downgrade is needed. See [compatibility.md](compatibility.md). |
 | `source_version_unavailable` | The bridge could not read `/Applications/WeChat.app/Contents/Info.plist`. | Check that WeChat is installed in `/Applications`, then run `doctor`. |
 | `unsupported_schema` | The database layout differs from the tested build. | Run `inspect-schema` and report the code. Do not run setup. |
 | `setup_prerequisites_missing` | The Mac is not arm64, or the command runs as root. | Run `setup prepare` as your normal user on an Apple silicon Mac. |
@@ -92,7 +92,7 @@ people ask about most:
 | Later pages show messages newer than the first page, or a `sort=recent` conversation is missing from later pages | Paging reads live data with no pinned snapshot. Rows written after the first page can appear in later pages, and a conversation that gets new messages moves ahead of the pages already read. | Expected. Start again without a cursor for a fresh ordering. |
 | A message you saw on your phone is absent | Messages that never synced to this Mac do not exist locally. `complete_phone_history` is always `false`. | Nothing to fix. The bridge reports what the Mac holds. |
 | An image arrives as a labeled thumbnail or source bytes | The original is WXGF (unsupported), animated, HEVC, or not downloaded to this Mac. The bridge never swaps a thumbnail in for an original. | Read `availability` and `diagnostic_code` on the attachment. See [compatibility.md](compatibility.md). |
-| WeChat updated and nothing works | The new build may be unsupported. | Run `doctor`. If `wechat_build` is not 270102, 270135 or 270390, wait for a project update. |
+| WeChat updated and nothing works | The new build may be unsupported. | Run `doctor`. If `wechat_build` is not 270102, 270135, 270390 or 270601, wait for a project update. |
 
 ## What not to do
 

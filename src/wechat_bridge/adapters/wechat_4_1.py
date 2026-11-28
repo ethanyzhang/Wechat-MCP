@@ -28,8 +28,9 @@ from .wire import parse_fields
 ADAPTER_VERSION = "wechat-4.1.15-270102-270135-v4"
 # 270135 (auto-update, 14 Oct 2026) was accepted on evidence that every required
 # table and column is identical to 270102; see docs/compatibility.md.
-# WeChat version -> builds whose required schemas this adapter was checked against (270390 is 4.2.0).
-SUPPORTED_VERSIONS = {"4.1.15": frozenset({"270102", "270135"}), "4.2.0": frozenset({"270390"})}
+# WeChat version -> builds whose required schemas this adapter was checked against (270390 is 4.2.0, 270601 is 4.2.1).
+SUPPORTED_VERSIONS = {"4.1.15": frozenset({"270102", "270135"}), "4.2.0": frozenset({"270390"}),
+                      "4.2.1": frozenset({"270601"})}
 SUPPORTED_BUILDS = frozenset().union(*SUPPORTED_VERSIONS.values())
 INFO_PLIST = Path("/Applications/WeChat.app/Contents/Info.plist")
 CONTACT = {"id": "INTEGER", "username": "TEXT", "nick_name": "TEXT", "remark": "TEXT"}

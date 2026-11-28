@@ -90,7 +90,7 @@ copy of the history.
 
 - **Owner:** `adapters/` (`wechat_4_1`, `schema`, `messages`, `replies`,
   `identity`, `wire`).
-- **Does:** checks the installed build (270102 or 270135 of 4.1.15; 270390 of 4.2.0), observes
+- **Does:** checks the installed build (270102 or 270135 of 4.1.15; 270390 of 4.2.0; 270601 of 4.2.1), observes
   each schema against a whitelist, decodes message content (including
   Zstandard text, XML and protobuf), and derives opaque IDs
   (`<kind>_<64 hex>`) with keyed HMAC-SHA256 from the secret in `identity.json`.
