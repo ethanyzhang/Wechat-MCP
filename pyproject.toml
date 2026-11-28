@@ -24,6 +24,9 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "lldb: runs Apple LLDB against a real process; needs debugger authorization, so it is skipped unless WECHAT_BRIDGE_LLDB_TESTS=1",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 "third_party/licenses/acmerfight-toolkit.txt" = "wechat_bridge/_licenses/acmerfight-toolkit.txt"

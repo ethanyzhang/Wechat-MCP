@@ -6,9 +6,13 @@ import subprocess
 
 import pytest
 
+from tests.conftest import LLDB_SKIP_REASON, lldb_tests_enabled
 from tests.support.encrypted import create_database
 from wechat_bridge.setup import lldb_capture
 from wechat_bridge.setup.system import process_identity
+
+# Opt-in only: see tests/conftest.py and .github/CONTRIBUTING.md.
+pytestmark = pytest.mark.lldb
 
 
 @pytest.mark.parametrize("exit_code", [0, 255])
@@ -33,6 +37,9 @@ def test_native_capture_deadline_remains_timeout_and_closes_owned_process(tmp_pa
 
 
 def run_probe(tmp_path, body):
+    # Second guard, before clang or LLDB runs, for any caller the marker misses.
+    if not lldb_tests_enabled():
+        pytest.skip(LLDB_SKIP_REASON)
     directory = tmp_path.resolve()
     source, executable = directory / "probe.c", directory / "probe"
     source.write_text("#include <unistd.h>\nint main(void) { " + body + " }\n")

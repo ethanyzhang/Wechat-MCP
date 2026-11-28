@@ -21,12 +21,29 @@ By contributing you license your contribution under the project's MIT license ([
 
 ```sh
 uv sync --locked
-uv run pytest -q                                    # full suite; must pass with 0 skips
+uv run pytest -q                                    # full suite; must pass with only the 3 LLDB skips
 uv run pytest tests/unit/test_keys.py -q            # one file
 uv run pytest tests/integration/test_mcp.py::NAME   # one test
 uv build                                            # wheel, when packaging changes
 uv run python -m benchmarks.search --samples 200 --synthetic-records 10000  # query latency
 ```
+
+`uv run pytest -q` never starts a debugger. The three tests in
+`tests/integration/test_capture_lifecycle.py` carry the `lldb` marker: they
+run the real LLDB capture helper against a small probe program, and attaching
+a debugger needs macOS debugger authorization. With Developer mode off
+(`DevToolsSecurity -status`), each run opens a password dialog, and an
+unattended run hangs until the tests time out. So they are skipped unless you
+opt in, at the screen, with the Apple Command Line Tools installed:
+
+```sh
+WECHAT_BRIDGE_LLDB_TESTS=1 uv run pytest -m lldb -q   # the 3 LLDB tests; expect a debugger authorization prompt
+```
+
+Only the exact value `1` opts in. Run them when you change
+`src/wechat_bridge/setup/lldb_capture.py` or how `setup/system.py` launches it.
+A new test that starts LLDB must set `pytestmark = pytest.mark.lldb`;
+`tests/unit/test_lldb_opt_in.py` checks that.
 
 The project configures no linter, formatter or type checker, and a drive-by
 change should not add one. Match the style of the surrounding file by hand.
@@ -145,7 +162,7 @@ that includes private material is not acceptable.
 ### Pull request checklist
 
 - [ ] Branch name and commit messages follow the conventions above
-- [ ] `uv run pytest -q` passes with 0 skips after the last change
+- [ ] `uv run pytest -q` passes with no skips other than the 3 LLDB tests after the last change; a change to the LLDB helper also passes `WECHAT_BRIDGE_LLDB_TESTS=1 uv run pytest -m lldb -q`
 - [ ] New behavior and bug fixes have tests; bug fixes include a failing-first regression
 - [ ] Tests use synthetic fixtures only; no real identifiers, keys, content or paths anywhere in the diff
 - [ ] No invariant above is weakened; no new write, send, SQL, shell, network or arbitrary-path capability
